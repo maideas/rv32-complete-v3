@@ -157,14 +157,19 @@ private:
             case 0b011: {  // C.ADDI16SP / C.LUI
                 d.rd = (instr >> 7) & 0x1F;
                 if (d.rd == 2) {
-                    d.type = InstrType::C_ADDI16SP;
-                    d.rs1 = 2;
-                    d.imm = ((instr >> 2) & 0x1) << 5 |
-                            ((instr >> 3) & 0x3) << 7 |
-                            ((instr >> 5) & 0x1) << 6 |
-                            ((instr >> 6) & 0x1) << 4 |
-                            ((instr >> 12) & 0x1) << 9;
-                    if (d.imm & 0x200) d.imm |= 0xFFFFFC00;
+                    // C.ADDI16SP with nzimm = 0 is a reserved encoding.
+                    uint32_t nzimm = 
+                        ((instr >> 2) & 0x1) << 5 |
+                        ((instr >> 3) & 0x3) << 7 |
+                        ((instr >> 5) & 0x1) << 6 |
+                        ((instr >> 6) & 0x1) << 4 |
+                        ((instr >> 12) & 0x1) << 9;
+                    if (nzimm != 0) {
+                      d.type = InstrType::C_ADDI16SP;
+                      d.rs1 = 2;
+                      d.imm = nzimm;
+                      if (d.imm & 0x200) d.imm |= 0xFFFFFC00;
+                    }
                 } else if (d.rd != 0) {
                     // C.LUI with nzimm = 0 is a reserved encoding.
                     uint32_t nzimm6 = ((instr >> 2) & 0x1F) | (((instr >> 12) & 0x1) << 5);

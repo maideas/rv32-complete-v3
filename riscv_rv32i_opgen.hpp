@@ -349,11 +349,6 @@ inline uint32_t gen_fence(RNG& rng) {
     return encode_i_type(imm, 0, 0b000, 0, opcode::MISC);
 }
 
-inline uint32_t gen_fence_i(RNG& rng) {
-    (void)rng;  // No random fields
-    return encode_i_type(0, 0, 0b001, 0, opcode::MISC);
-}
-
 // System instructions
 inline uint32_t gen_ecall(RNG& rng) {
     (void)rng;
@@ -389,7 +384,7 @@ enum class InstrType {
     // R-type
     ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
     // Fence
-    FENCE, FENCE_I,
+    FENCE,
     // System
     ECALL, EBREAK,
     
@@ -429,7 +424,7 @@ private:
         gen_add, gen_sub, gen_sll, gen_slt, gen_sltu,
         gen_xor, gen_srl, gen_sra, gen_or, gen_and,
         // Fence
-        gen_fence, gen_fence_i,
+        gen_fence,
         // System
         gen_ecall, gen_ebreak
     };
@@ -464,7 +459,7 @@ public:
             InstrType::SLLI, InstrType::SRLI, InstrType::SRAI,
             InstrType::ADD, InstrType::SUB, InstrType::SLL, InstrType::SLT, InstrType::SLTU,
             InstrType::XOR, InstrType::SRL, InstrType::SRA, InstrType::OR, InstrType::AND,
-            InstrType::FENCE, InstrType::FENCE_I
+            InstrType::FENCE
         };
         InstrType type = safe_types[rng.range(0, sizeof(safe_types)/sizeof(safe_types[0]) - 1)];
         return generate(type);
@@ -539,7 +534,7 @@ public:
             "SLLI", "SRLI", "SRAI",
             "ADD", "SUB", "SLL", "SLT", "SLTU",
             "XOR", "SRL", "SRA", "OR", "AND",
-            "FENCE", "FENCE.I",
+            "FENCE",
             "ECALL", "EBREAK"
         };
         return names[static_cast<size_t>(type)];

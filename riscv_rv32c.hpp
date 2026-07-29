@@ -158,7 +158,7 @@ private:
                 d.rd = (instr >> 7) & 0x1F;
                 if (d.rd == 2) {
                     // C.ADDI16SP with nzimm = 0 is a reserved encoding.
-                    uint32_t nzimm = 
+                    uint32_t nzimm =
                         ((instr >> 2) & 0x1) << 5 |
                         ((instr >> 3) & 0x3) << 7 |
                         ((instr >> 5) & 0x1) << 6 |

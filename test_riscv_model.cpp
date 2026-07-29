@@ -357,6 +357,8 @@ static void test_rv32c() {
         CHECK(dec.decode(0x8002).type == rv32c::InstrType::ILLEGAL); // c.jr x0
         CHECK(dec.decode(0x4002).type == rv32c::InstrType::ILLEGAL); // c.lwsp x0
         CHECK(dec.decode(0x6081).type == rv32c::InstrType::ILLEGAL); // c.lui x1, 0
+        CHECK(dec.decode(0x6101).type == rv32c::InstrType::ILLEGAL); // c.addi16sp sp, 0
+        CHECK(dec.decode(0x6105).type == rv32c::InstrType::C_ADDI16SP); // c.addi16sp sp, 32
         // c.slli x1, 32+ (bit 12 set)
         CHECK(dec.decode(0x1082).type == rv32c::InstrType::ILLEGAL);
         // c.srli bit12: 100 1 00 000 00000 01 = 0x9001

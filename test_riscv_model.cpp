@@ -1706,6 +1706,199 @@ static void test_supervisor_user_mode() {
         CHECK_EQ((sys2.cpu.csrs.read(zicsr::csr_addr::MSTATUS) >> 11) & 3u, 3u); // M
         PASS();
     }
+
+    {
+        TEST("Interrupt priority order: MEI > MSI > MTI and SEI > SSI");
+        const uint32_t NOP = 0x00000013u;
+
+        // M-mode priorities (nothing delegated): MEI, MSI, MTI all pending.
+        {
+            auto sys = make_sys(4096, su_cfg);
+            sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+            sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_MASK);
+            sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_MIE);
+            sys.cpu.set_external_interrupt(true);
+            sys.cpu.set_software_interrupt(true);
+            sys.cpu.set_timer_interrupt(true);
+
+            const struct { uint32_t cause; int line; } order[] = {
+                { 11u, 0 },  // MEI
+                { 3u,  1 },  // MSI
+                { 7u,  2 },  // MTI
+            };
+            for (auto& o : order) {
+                auto r = sys.step();
+                CHECK(r.interrupt);
+                CHECK_EQ(r.trap_cause, exception::INTERRUPT_BIT | o.cause);
+                // Trap entry cleared MIE; clear the line and re-enable.
+                if (o.line == 0) sys.cpu.set_external_interrupt(false);
+                if (o.line == 1) sys.cpu.set_software_interrupt(false);
+                if (o.line == 2) sys.cpu.set_timer_interrupt(false);
+                uint32_t ms = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
+                sys.cpu.csrs.set(zicsr::csr_addr::MSTATUS,
+                                 ms | zicsr::CSRFile::MSTATUS_MIE);
+            }
+        }
+
+        // S-mode priorities: delegate SEI and SSI, pend both -> SEI first.
+        {
+            auto sys = make_sys(4096, su_cfg);
+            sys.cpu.csrs.write(zicsr::csr_addr::STVEC, 0x900u);
+            sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG,
+                               zicsr::CSRFile::MI_SEI | zicsr::CSRFile::MI_SSI);
+            sys.cpu.csrs.write(zicsr::csr_addr::MIE,
+                               zicsr::CSRFile::MI_SEI | zicsr::CSRFile::MI_SSI);
+            sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_SIE);
+            enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+            sys.cpu.set_supervisor_external_interrupt(true);
+            sys.cpu.set_supervisor_software_interrupt(true);
+
+            auto r = sys.step();
+            CHECK(r.interrupt);
+            CHECK_EQ(r.trap_cause, exception::S_EXTERNAL_INTERRUPT);
+
+            sys.cpu.set_supervisor_external_interrupt(false);
+            uint32_t ms = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
+            sys.cpu.csrs.set(zicsr::csr_addr::MSTATUS,
+                             ms | zicsr::CSRFile::MSTATUS_SIE);
+            r = sys.step();
+            CHECK(r.interrupt);
+            CHECK_EQ(r.trap_cause, exception::S_SOFTWARE_INTERRUPT);
+        }
+        (void)NOP;
+        PASS();
+    }
+
+    {
+        TEST("M-mode interrupt is taken while executing in S mode (MIE=0)");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_MTI);
+        // Global MIE stays 0: interrupts targeting a more privileged mode
+        // are taken regardless of mstatus.MIE.
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.cpu.set_timer_interrupt(true);
+        auto r = sys.step();
+        CHECK(r.interrupt);
+        CHECK_EQ(r.trap_cause, exception::M_TIMER_INTERRUPT);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::MACHINE);
+        CHECK_EQ(sys.cpu.pc, 0x800u);
+        // MPP records the mode the interrupt was taken from.
+        CHECK_EQ((sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS) >> 11) & 3u, 1u);
+        PASS();
+    }
+
+    {
+        TEST("S-delegated interrupt is not taken while in M mode");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG, zicsr::CSRFile::MI_SSI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_SSI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_MIE);
+        sys.cpu.set_supervisor_software_interrupt(true);
+        sys.memory.write32(sys.cpu.pc, 0x00000013u);   // nop
+        auto r = sys.step();
+        CHECK(!r.interrupt);
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.pc, 4u);   // nop retired normally
+        PASS();
+    }
+
+    {
+        TEST("S interrupt in S mode gated by mstatus.SIE");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::STVEC, 0x900u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG, zicsr::CSRFile::MI_SSI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_SSI);
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);  // SIE = 0
+        sys.memory.write32(0x100u, 0x00000013u);   // nop
+        sys.cpu.set_supervisor_software_interrupt(true);
+        auto r = sys.step();
+        CHECK(!r.interrupt);
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.pc, 0x104u);
+        // Enable SIE: the pending interrupt is now taken.
+        uint32_t ms = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
+        sys.cpu.csrs.set(zicsr::csr_addr::MSTATUS, ms | zicsr::CSRFile::MSTATUS_SIE);
+        r = sys.step();
+        CHECK(r.interrupt);
+        CHECK_EQ(r.trap_cause, exception::S_SOFTWARE_INTERRUPT);
+        CHECK_EQ(sys.cpu.pc, 0x900u);
+        PASS();
+    }
+
+    {
+        TEST("sstatus reads/writes only the S-visible mstatus subset");
+        auto sys = make_sys(4096, su_cfg);
+        uint32_t s_bits = zicsr::CSRFile::MSTATUS_SIE  |
+                          zicsr::CSRFile::MSTATUS_SPIE |
+                          zicsr::CSRFile::MSTATUS_SPP  |
+                          zicsr::CSRFile::MSTATUS_SUM  |
+                          zicsr::CSRFile::MSTATUS_MXR;
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS,
+                           s_bits | zicsr::CSRFile::MSTATUS_MIE |
+                           zicsr::CSRFile::MSTATUS_TVM);
+        // Read subset: S bits plus hardwired FS/SD (F extension enabled).
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SSTATUS),
+                 s_bits | zicsr::CSRFile::MSTATUS_FS | zicsr::CSRFile::MSTATUS_SD);
+        // Write subset: only SIE/SPIE/SPP/SUM/MXR are affected.
+        sys.cpu.csrs.write(zicsr::csr_addr::SSTATUS, zicsr::CSRFile::MSTATUS_SPP);
+        uint32_t ms = sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_SPP);
+        CHECK(!(ms & zicsr::CSRFile::MSTATUS_SIE));
+        CHECK(!(ms & zicsr::CSRFile::MSTATUS_SPIE));
+        CHECK(!(ms & zicsr::CSRFile::MSTATUS_SUM));
+        CHECK(!(ms & zicsr::CSRFile::MSTATUS_MXR));
+        // Non-subset fields are untouched by the sstatus write.
+        CHECK(ms & zicsr::CSRFile::MSTATUS_MIE);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_TVM);
+        PASS();
+    }
+
+    {
+        TEST("SATP access from S mode traps when mstatus.TVM=1");
+        auto sys = make_sys(4096, su_cfg);
+        uint32_t csrr_satp = zicsr::encode::csrr(3, zicsr::csr_addr::SATP);
+
+        // M mode with TVM=1: allowed (TVM only affects S mode).
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_TVM);
+        sys.memory.write32(sys.cpu.pc, csrr_satp);
+        CHECK(!sys.step().trap);
+
+        // S mode with TVM=0: allowed.
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, 0);   // clear TVM from step 1
+        sys.memory.write32(0x100u, csrr_satp);
+        CHECK(!sys.step().trap);
+
+        // S mode with TVM=1: illegal instruction.
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_TVM);
+        sys.memory.write32(sys.cpu.pc, csrr_satp);
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        PASS();
+    }
+
+    {
+        TEST("MRET is illegal outside M mode");
+        auto sys = make_sys(4096, su_cfg);
+        // U mode.
+        enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+        sys.memory.write32(0x100u, 0x30200073u);   // mret
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+
+        // S mode.
+        sys.cpu.reset();
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.memory.write32(0x100u, 0x30200073u);
+        r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        PASS();
+    }
 }
 
 // ============================================================================

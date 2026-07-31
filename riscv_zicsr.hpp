@@ -481,7 +481,9 @@ public:
                 break;
             }
             case csr_addr::MEDELEG:
-                csrs[csr_addr::MEDELEG] = value & 0xFFFFu;
+                // Bit 11 (ECALL-from-M) is read-only zero: M-mode traps
+                // can never be delegated.
+                csrs[csr_addr::MEDELEG] = value & 0xF7FFu;
                 break;
             case csr_addr::MIDELEG:
                 csrs[csr_addr::MIDELEG] = value & MI_MASK;

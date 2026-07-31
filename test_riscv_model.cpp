@@ -1662,6 +1662,50 @@ static void test_supervisor_user_mode() {
         }
         PASS();
     }
+
+    {
+        TEST("Exceptions taken in M mode are never delegated to S");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        sys.cpu.csrs.write(zicsr::csr_addr::STVEC, 0x900u);
+        // Delegate breakpoint (cause 3) to S mode, then take it in M mode.
+        sys.cpu.csrs.write(zicsr::csr_addr::MEDELEG, 1u << 3);
+        sys.memory.write32(sys.cpu.pc, 0x00100073u);   // ebreak (M mode)
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::BREAKPOINT);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::MACHINE);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MCAUSE), exception::BREAKPOINT);
+        CHECK_EQ(sys.cpu.pc, 0x800u);
+        // scause must remain untouched.
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SCAUSE), 0u);
+        PASS();
+    }
+
+    {
+        TEST("medeleg bit 11 (ECALL-from-M) is read-only zero");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MEDELEG, 0xFFFFu);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MEDELEG) & (1u << 11), 0u);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MEDELEG), 0xF7FFu);
+        PASS();
+    }
+
+    {
+        TEST("MRET sets MPP to the least-privileged supported mode");
+        auto sys = make_sys(4096, su_cfg);   // U-mode supported
+        enter_mode(sys, PrivilegeLevel::MACHINE, 0x100u);
+        CHECK_EQ((sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS) >> 11) & 3u, 0u); // U
+
+        CPUConfig m_only;                     // M-only: least privileged is M
+        auto sys2 = make_sys(4096, m_only);
+        sys2.cpu.csrs.write(zicsr::csr_addr::MEPC, 0x100u);
+        sys2.cpu.csrs.set(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_MPIE);
+        sys2.memory.write32(sys2.cpu.pc, 0x30200073u);   // mret
+        CHECK(!sys2.step().trap);
+        CHECK_EQ((sys2.cpu.csrs.read(zicsr::csr_addr::MSTATUS) >> 11) & 3u, 3u); // M
+        PASS();
+    }
 }
 
 // ============================================================================

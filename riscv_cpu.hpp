@@ -166,10 +166,12 @@ public:
         reservation.clear();
         
         // Configure the CSR file first, then (re-)initialize it so the
-        // hardwired fields reflect the configuration.
-        csrs.set_f_extension(config.enable_f_extension);
+        // hardwired fields reflect the configuration.  Note: the S/U-mode
+        // flags must be set before set_f_extension(), because the latter
+        // re-legalizes mstatus using the mode-dependent legal mask.
         csrs.set_s_mode(config.enable_s_mode);
         csrs.set_u_mode(config.enable_u_mode);
+        csrs.set_f_extension(config.enable_f_extension);
         csrs.set_mepc_mask(config.enable_c_extension ? ~1u : ~3u);
         csrs.reset();
         csrs.write(zicsr::csr_addr::MTVEC, config.mtvec_reset);
@@ -648,6 +650,15 @@ private:
     // implemented in this phase.
     PrivilegeLevel delegate_target(uint32_t cause, bool is_interrupt) const {
         if (!config.enable_s_mode) return PrivilegeLevel::MACHINE;
+        // Traps taken while in M-mode are never delegated to a less
+        // privileged mode (medeleg only applies to traps from S/U).
+        // (For interrupts this case is also filtered by
+        // interrupt_globally_enabled(), which skips lower-privilege
+        // targets while in M-mode.)
+        if (!is_interrupt &&
+            csrs.get_privilege() == PrivilegeLevel::MACHINE) {
+            return PrivilegeLevel::MACHINE;
+        }
         uint32_t bit = cause & 0x7FFFFFFFu;
         if (bit >= 32) return PrivilegeLevel::MACHINE;
         uint32_t deleg = csrs.get(is_interrupt ? zicsr::csr_addr::MIDELEG
@@ -740,8 +751,10 @@ private:
         return false;
     }
 
-    // MRET: restore privilege from MPP, MIE <- MPIE, MPIE <- 1, MPP <- M.
-    // Clear MPRV when returning to a mode less privileged than M.
+    // MRET: restore privilege from MPP, MIE <- MPIE, MPIE <- 1, and MPP
+    // is set to the least-privileged supported mode (U if U-mode is
+    // implemented, else M). Clear MPRV when returning to a mode less
+    // privileged than M.
     void do_mret(CPUExecResult& result) {
         uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
         uint32_t mpp = (mstatus >> 11) & 3u;
@@ -750,7 +763,8 @@ private:
         if (mpie) mstatus |= zicsr::CSRFile::MSTATUS_MIE;
         mstatus |= zicsr::CSRFile::MSTATUS_MPIE;
         mstatus &= ~zicsr::CSRFile::MSTATUS_MPP;
-        mstatus |= (3u << 11);
+        uint32_t mpp_reset = csrs.has_u_mode() ? 0u : 3u;
+        mstatus |= (mpp_reset << 11);
         if (mpp != 3) mstatus &= ~zicsr::CSRFile::MSTATUS_MPRV;
         csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
 

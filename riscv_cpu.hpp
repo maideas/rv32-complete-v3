@@ -60,6 +60,8 @@ struct CPUConfig {
     bool enable_zbb = true;           // Basic bitmanip
     bool enable_zbs = true;           // Single-bit bitmanip
     bool enable_zicond = true;        // Conditional zero
+    bool enable_s_mode = false;       // Supervisor mode
+    bool enable_u_mode = false;       // User mode
     bool allow_misaligned_data = false; // false: misaligned data accesses trap
     uint32_t reset_vector = 0;        // Initial PC value
     uint32_t mtvec_reset = 0;         // Initial trap vector
@@ -166,25 +168,29 @@ public:
         // Configure the CSR file first, then (re-)initialize it so the
         // hardwired fields reflect the configuration.
         csrs.set_f_extension(config.enable_f_extension);
+        csrs.set_s_mode(config.enable_s_mode);
+        csrs.set_u_mode(config.enable_u_mode);
         csrs.set_mepc_mask(config.enable_c_extension ? ~1u : ~3u);
         csrs.reset();
         csrs.write(zicsr::csr_addr::MTVEC, config.mtvec_reset);
-        
+
         sync_executor_config();
-        
+
         // Set MISA based on enabled extensions
         uint32_t misa = 0x40000100;  // RV32 (MXL=1), I
-        if (config.enable_a_extension) misa |= (1 << 0);   // A
-        if (config.enable_c_extension) misa |= (1 << 2);   // C
-        if (config.enable_f_extension) misa |= (1 << 5);   // F
-        if (config.enable_m_extension) misa |= (1 << 12);  // M
+        if (config.enable_a_extension) misa |= (1u << 0);   // A
+        if (config.enable_c_extension) misa |= (1u << 2);   // C
+        if (config.enable_f_extension) misa |= (1u << 5);   // F
+        if (config.enable_m_extension) misa |= (1u << 12);  // M
+        if (config.enable_s_mode)      misa |= (1u << 18);  // S
+        if (config.enable_u_mode)      misa |= (1u << 20);  // U
         csrs.set_misa(misa);
     }
     
     // ========================================================================
     // Interrupt input lines (level-sensitive; drive mip)
     // ========================================================================
-    
+
     void set_external_interrupt(bool level) {
         set_mip_bit(zicsr::CSRFile::MI_MEI, level);
     }
@@ -193,6 +199,16 @@ public:
     }
     void set_software_interrupt(bool level) {
         set_mip_bit(zicsr::CSRFile::MI_MSI, level);
+    }
+
+    void set_supervisor_external_interrupt(bool level) {
+        set_mip_bit(zicsr::CSRFile::MI_SEI, level);
+    }
+    void set_supervisor_timer_interrupt(bool level) {
+        set_mip_bit(zicsr::CSRFile::MI_STI, level);
+    }
+    void set_supervisor_software_interrupt(bool level) {
+        set_mip_bit(zicsr::CSRFile::MI_SSI, level);
     }
     
     // ========================================================================
@@ -313,6 +329,7 @@ public:
     // Debug utility: never throws. Returns "<fetch fault>" if the address
     // is not readable on the given bus.
     std::string disasm(Bus& bus, uint32_t addr) {
+        i_decoder.s_mode_enabled = config.enable_s_mode;
         uint32_t lo;
         try {
             lo = bus.read16(addr);
@@ -374,8 +391,10 @@ private:
     // ========================================================================
     
     void sync_executor_config() {
+        i_decoder.s_mode_enabled = config.enable_s_mode;
         i_executor.c_ext_enabled = config.enable_c_extension;
         i_executor.allow_misaligned = config.allow_misaligned_data;
+        i_executor.priv = csrs.get_privilege();
         c_executor.allow_misaligned = config.allow_misaligned_data;
         f_executor.allow_misaligned = config.allow_misaligned_data;
         fc_executor.allow_misaligned = config.allow_misaligned_data;
@@ -436,6 +455,15 @@ private:
         // Zicsr (CSRRW/CSRRS/CSRRC and immediate forms)
         if (config.enable_zicsr && csr_decoder.is_csr_instruction(instr)) {
             auto decoded = csr_decoder.decode(instr);
+            // SATP access from S mode is illegal when TVM=1.
+            if (decoded.csr == zicsr::csr_addr::SATP &&
+                config.enable_s_mode &&
+                csrs.get_privilege() == PrivilegeLevel::SUPERVISOR &&
+                (csrs.get(zicsr::csr_addr::MSTATUS) & zicsr::CSRFile::MSTATUS_TVM)) {
+                take_exception(result, exception::ILLEGAL_INSTRUCTION, instr,
+                               "SATP access blocked by TVM");
+                return;
+            }
             result.mnemonic = decoded.mnemonic();
             auto exec = csr_executor.execute(decoded, regs, csrs);
             if (!exec.valid) {
@@ -530,17 +558,61 @@ private:
             return;
         }
         
-        // Base RV32I (incl. ECALL/EBREAK/MRET/WFI)
+        // Base RV32I (incl. ECALL/EBREAK/MRET/SRET/SFENCE.VMA/WFI)
         auto decoded = i_decoder.decode(instr);
         result.mnemonic = decoded.mnemonic();
         auto exec = i_executor.execute(decoded, regs, bus, pc);
         result.next_pc = exec.next_pc;
         result.branch_taken = exec.branch_taken;
-        
+
+        PrivilegeLevel current_priv = csrs.get_privilege();
+        uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
+
         if (exec.mret) {
-            do_mret(result);
+            if (current_priv != PrivilegeLevel::MACHINE) {
+                take_exception(result, exception::ILLEGAL_INSTRUCTION, instr,
+                               "MRET executed outside M-mode");
+            } else {
+                do_mret(result);
+            }
             return;
         }
+
+        if (exec.sret) {
+            if (!config.enable_s_mode ||
+                current_priv == PrivilegeLevel::USER ||
+                (current_priv == PrivilegeLevel::SUPERVISOR &&
+                 (mstatus & zicsr::CSRFile::MSTATUS_TSR))) {
+                take_exception(result, exception::ILLEGAL_INSTRUCTION, instr,
+                               "SRET not allowed");
+            } else {
+                do_sret(result);
+            }
+            return;
+        }
+
+        if (exec.sfence_vma) {
+            if (current_priv == PrivilegeLevel::USER ||
+                (current_priv == PrivilegeLevel::SUPERVISOR &&
+                 (mstatus & zicsr::CSRFile::MSTATUS_TVM))) {
+                take_exception(result, exception::ILLEGAL_INSTRUCTION, instr,
+                               "SFENCE.VMA not allowed");
+            }
+            // No MMU yet: execute as NOP when allowed.
+            return;
+        }
+
+        if (exec.wfi) {
+            if (current_priv == PrivilegeLevel::USER ||
+                (current_priv == PrivilegeLevel::SUPERVISOR &&
+                 (mstatus & zicsr::CSRFile::MSTATUS_TW))) {
+                take_exception(result, exception::ILLEGAL_INSTRUCTION, instr,
+                               "WFI not allowed");
+            }
+            // Otherwise legal and behaves as NOP in this model.
+            return;
+        }
+
         if (exec.trap) {
             take_exception(result, exec.trap_cause, exec.trap_value,
                            exec.trap_info);
@@ -560,74 +632,153 @@ private:
         result.trap_cause = cause;
         result.trap_value = tval;
         result.trap_info = info;
-        
-        write_trap_csrs(cause, pc, tval);
-        result.next_pc = csrs.get(zicsr::csr_addr::MTVEC) & ~0x3u;
+
+        PrivilegeLevel target = delegate_target(cause, false);
+        if (target == PrivilegeLevel::SUPERVISOR) {
+            enter_s_trap(cause, tval, pc);
+            result.next_pc = csrs.get(zicsr::csr_addr::STVEC) & ~0x3u;
+        } else {
+            enter_m_trap(cause, tval, pc);
+            result.next_pc = csrs.get(zicsr::csr_addr::MTVEC) & ~0x3u;
+        }
     }
-    
-    // Check for a pending, enabled interrupt and take it if present.
-    // Priority order per the privileged spec: MEI > MSI > MTI.
-    bool take_pending_interrupt(CPUExecResult& result) {
+
+    // Choose target privilege for an exception/interrupt based on the
+    // delegation registers.  U-mode delegation (sedeleg/sideleg) is not
+    // implemented in this phase.
+    PrivilegeLevel delegate_target(uint32_t cause, bool is_interrupt) const {
+        if (!config.enable_s_mode) return PrivilegeLevel::MACHINE;
+        uint32_t bit = cause & 0x7FFFFFFFu;
+        if (bit >= 32) return PrivilegeLevel::MACHINE;
+        uint32_t deleg = csrs.get(is_interrupt ? zicsr::csr_addr::MIDELEG
+                                                : zicsr::csr_addr::MEDELEG);
+        if ((deleg >> bit) & 1u) return PrivilegeLevel::SUPERVISOR;
+        return PrivilegeLevel::MACHINE;
+    }
+
+    bool interrupt_globally_enabled(PrivilegeLevel target) const {
+        PrivilegeLevel cur = csrs.get_privilege();
+        if (cur > target) return false;
+        if (cur < target) return true;
         uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
-        if (!(mstatus & zicsr::CSRFile::MSTATUS_MIE)) return false;
-        
-        uint32_t pending = csrs.get(zicsr::csr_addr::MIP) &
-                           csrs.get(zicsr::csr_addr::MIE) &
-                           zicsr::CSRFile::MI_MASK;
-        if (!pending) return false;
-        
-        uint32_t code;
-        if (pending & zicsr::CSRFile::MI_MEI)      code = 11;
-        else if (pending & zicsr::CSRFile::MI_MSI) code = 3;
-        else                                        code = 7;
-        
-        uint32_t cause = 0x80000000u | code;
-        write_trap_csrs(cause, pc, 0);
-        
-        uint32_t mtvec = csrs.get(zicsr::csr_addr::MTVEC);
-        uint32_t base = mtvec & ~0x3u;
-        // Vectored mode: interrupts target BASE + 4 * cause-code.
-        uint32_t target = ((mtvec & 0x3) == 1) ? (base + 4 * code) : base;
-        
-        result.interrupt = true;
-        result.trap_cause = cause;
-        result.trap_value = 0;
-        result.trap_info = "Interrupt";
-        result.instr_size = 0;
-        result.next_pc = target;
-        return true;
+        if (target == PrivilegeLevel::MACHINE)
+            return (mstatus & zicsr::CSRFile::MSTATUS_MIE) != 0;
+        if (target == PrivilegeLevel::SUPERVISOR)
+            return (mstatus & zicsr::CSRFile::MSTATUS_SIE) != 0;
+        return false;
     }
-    
-    // Common trap-CSR update for exceptions and interrupts:
-    // mepc <- pc, mcause <- cause, mtval <- tval,
-    // mstatus.MPIE <- mstatus.MIE, mstatus.MIE <- 0 (MPP is hardwired M).
-    void write_trap_csrs(uint32_t cause, uint32_t trap_pc, uint32_t tval) {
-        // Route mepc through write() so the WARL mask applies.
+
+    void enter_m_trap(uint32_t cause, uint32_t tval, uint32_t trap_pc) {
+        uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
+        bool old_mie = (mstatus & zicsr::CSRFile::MSTATUS_MIE) != 0;
+        mstatus &= ~(zicsr::CSRFile::MSTATUS_MIE |
+                     zicsr::CSRFile::MSTATUS_MPIE |
+                     zicsr::CSRFile::MSTATUS_MPP);
+        if (old_mie) mstatus |= zicsr::CSRFile::MSTATUS_MPIE;
+        uint32_t mpp = static_cast<uint32_t>(csrs.get_privilege());
+        if (mpp > 3) mpp = 3;
+        mstatus |= (mpp << 11);
+        csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
+        csrs.set_privilege(PrivilegeLevel::MACHINE);
         csrs.write(zicsr::csr_addr::MEPC, trap_pc);
         csrs.set(zicsr::csr_addr::MCAUSE, cause);
         csrs.set(zicsr::csr_addr::MTVAL, tval);
-        
-        uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
-        bool old_mie = (mstatus & zicsr::CSRFile::MSTATUS_MIE) != 0;
-        mstatus &= ~(zicsr::CSRFile::MSTATUS_MIE | zicsr::CSRFile::MSTATUS_MPIE);
-        if (old_mie) mstatus |= zicsr::CSRFile::MSTATUS_MPIE;
-        csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
     }
-    
-    // MRET: pc <- mepc, mstatus.MIE <- mstatus.MPIE, mstatus.MPIE <- 1.
-    // (MPP is hardwired to M in this M-only implementation.)
+
+    void enter_s_trap(uint32_t cause, uint32_t tval, uint32_t trap_pc) {
+        uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
+        bool old_sie = (mstatus & zicsr::CSRFile::MSTATUS_SIE) != 0;
+        mstatus &= ~(zicsr::CSRFile::MSTATUS_SIE |
+                     zicsr::CSRFile::MSTATUS_SPIE |
+                     zicsr::CSRFile::MSTATUS_SPP);
+        if (old_sie) mstatus |= zicsr::CSRFile::MSTATUS_SPIE;
+        uint32_t spp = (csrs.get_privilege() == PrivilegeLevel::SUPERVISOR) ? 1u : 0u;
+        mstatus |= (spp << 8);
+        csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
+        csrs.set_privilege(PrivilegeLevel::SUPERVISOR);
+        csrs.write(zicsr::csr_addr::SEPC, trap_pc);
+        csrs.set(zicsr::csr_addr::SCAUSE, cause);
+        csrs.set(zicsr::csr_addr::STVAL, tval);
+    }
+
+    // Check for a pending, enabled interrupt and take it if present.
+    // Standard priority order: MEI > MSI > MTI > SEI > SSI > STI.
+    bool take_pending_interrupt(CPUExecResult& result) {
+        uint32_t mip = csrs.get(zicsr::csr_addr::MIP);
+        uint32_t mie = csrs.get(zicsr::csr_addr::MIE);
+        uint32_t pending = mip & mie;
+        if (!pending) return false;
+
+        static const uint32_t priority[] = {11, 3, 7, 9, 1, 5};
+        for (uint32_t code : priority) {
+            uint32_t bit = 1u << code;
+            if (!(pending & bit)) continue;
+
+            uint32_t cause = exception::INTERRUPT_BIT | code;
+            PrivilegeLevel target = delegate_target(cause, true);
+            if (!interrupt_globally_enabled(target)) continue;
+
+            if (target == PrivilegeLevel::SUPERVISOR) {
+                enter_s_trap(cause, 0, pc);
+                uint32_t stvec = csrs.get(zicsr::csr_addr::STVEC);
+                uint32_t base = stvec & ~0x3u;
+                result.next_pc = ((stvec & 0x3) == 1) ? (base + 4 * code) : base;
+            } else {
+                enter_m_trap(cause, 0, pc);
+                uint32_t mtvec = csrs.get(zicsr::csr_addr::MTVEC);
+                uint32_t base = mtvec & ~0x3u;
+                result.next_pc = ((mtvec & 0x3) == 1) ? (base + 4 * code) : base;
+            }
+
+            result.interrupt = true;
+            result.trap_cause = cause;
+            result.trap_value = 0;
+            result.trap_info = "Interrupt";
+            result.instr_size = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // MRET: restore privilege from MPP, MIE <- MPIE, MPIE <- 1, MPP <- M.
+    // Clear MPRV when returning to a mode less privileged than M.
     void do_mret(CPUExecResult& result) {
         uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
+        uint32_t mpp = (mstatus >> 11) & 3u;
         bool mpie = (mstatus & zicsr::CSRFile::MSTATUS_MPIE) != 0;
         mstatus &= ~zicsr::CSRFile::MSTATUS_MIE;
         if (mpie) mstatus |= zicsr::CSRFile::MSTATUS_MIE;
         mstatus |= zicsr::CSRFile::MSTATUS_MPIE;
+        mstatus &= ~zicsr::CSRFile::MSTATUS_MPP;
+        mstatus |= (3u << 11);
+        if (mpp != 3) mstatus &= ~zicsr::CSRFile::MSTATUS_MPRV;
         csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
-        
+
+        PrivilegeLevel new_priv = (mpp == 0) ? PrivilegeLevel::USER :
+                                  (mpp == 1) ? PrivilegeLevel::SUPERVISOR :
+                                               PrivilegeLevel::MACHINE;
+        csrs.set_privilege(new_priv);
         result.next_pc = csrs.get(zicsr::csr_addr::MEPC);
         result.branch_taken = true;
     }
-    
+
+    // SRET: restore privilege from SPP, SIE <- SPIE, SPIE <- 1, SPP <- U.
+    void do_sret(CPUExecResult& result) {
+        uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
+        bool spie = (mstatus & zicsr::CSRFile::MSTATUS_SPIE) != 0;
+        bool spp = (mstatus & zicsr::CSRFile::MSTATUS_SPP) != 0;
+        mstatus &= ~zicsr::CSRFile::MSTATUS_SIE;
+        if (spie) mstatus |= zicsr::CSRFile::MSTATUS_SIE;
+        mstatus |= zicsr::CSRFile::MSTATUS_SPIE;
+        mstatus &= ~zicsr::CSRFile::MSTATUS_SPP;
+        mstatus &= ~zicsr::CSRFile::MSTATUS_MPRV;
+        csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
+
+        csrs.set_privilege(spp ? PrivilegeLevel::SUPERVISOR : PrivilegeLevel::USER);
+        result.next_pc = csrs.get(zicsr::csr_addr::SEPC);
+        result.branch_taken = true;
+    }
+
     void set_mip_bit(uint32_t bit, bool level) {
         uint32_t mip = csrs.get(zicsr::csr_addr::MIP);
         if (level) mip |= bit; else mip &= ~bit;

@@ -858,7 +858,7 @@ static void test_zicsr() {
     printf("I. Zicsr\n");
     
     {
-        TEST("Unimplemented CSRs trap (0x7C0, sscratch, time)");
+        TEST("Unimplemented CSRs trap (0x7C0, sscratch); time is alias of mcycle");
         auto sys = make_sys();
         auto csrr = [](uint16_t csr, uint8_t rd) {
             return (uint32_t(csr) << 20) | (2u << 12) | (uint32_t(rd) << 7) | 0x73u;
@@ -868,13 +868,15 @@ static void test_zicsr() {
         CHECK(r.trap);
         CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
         CHECK_EQ(r.trap_value, csrr(0x7C0, 1));
-        
+
         sys.cpu.pc = 4;
         sys.memory.write32(4, csrr(0x140, 1));            // sscratch (S-mode)
         CHECK(sys.step().trap);
         sys.cpu.pc = 8;
-        sys.memory.write32(8, csrr(0xC01, 1));            // time
-        CHECK(sys.step().trap);
+        sys.memory.write32(8, csrr(0xC01, 1));            // time is now alias
+        auto mcycle_before = sys.cpu.csrs.read(zicsr::csr_addr::MCYCLE);
+        CHECK(!sys.step().trap);
+        CHECK_EQ(sys.cpu.regs.read(1), mcycle_before);
         PASS();
     }
     {
@@ -1171,9 +1173,12 @@ static void test_traps_interrupts() {
         PASS();
     }
     {
-        TEST("mip is read-only via CSR writes; driven by interrupt lines");
+        TEST("Writable mip bits (MSIP/SSIP) via CSR writes; external bits read-only");
         auto sys = make_sys();
         sys.cpu.csrs.write(zicsr::csr_addr::MIP, 0xFFFFFFFF);
+        // Without S-mode only MSIP is writable.
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), zicsr::CSRFile::MI_MSI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIP, 0);
         CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), 0u);
         sys.cpu.set_software_interrupt(true);
         CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), zicsr::CSRFile::MI_MSI);
@@ -1354,6 +1359,312 @@ static void test_integration() {
 }
 
 // ============================================================================
+// L. Supervisor / User mode support
+// ============================================================================
+
+static void enter_mode(System& sys, PrivilegeLevel target, uint32_t target_pc) {
+    sys.memory.write32(sys.cpu.pc, 0x30200073u);                    // mret
+    sys.cpu.csrs.write(zicsr::csr_addr::MEPC, target_pc);
+    uint32_t mstatus = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
+    mstatus &= ~(zicsr::CSRFile::MSTATUS_MPP | zicsr::CSRFile::MSTATUS_MPRV);
+    uint32_t mpp = (target == PrivilegeLevel::USER) ? 0u :
+                   (target == PrivilegeLevel::SUPERVISOR) ? 1u : 3u;
+    mstatus |= (mpp << 11) | zicsr::CSRFile::MSTATUS_MPIE;
+    sys.cpu.csrs.set(zicsr::csr_addr::MSTATUS, mstatus);
+    auto r = sys.step();
+    CHECK(!r.trap && !r.interrupt);
+    CHECK_EQ(sys.cpu.csrs.get_privilege(), target);
+    CHECK_EQ(sys.cpu.pc, target_pc);
+}
+
+static void test_supervisor_user_mode() {
+    printf("L. Supervisor / User mode\n");
+
+    CPUConfig su_cfg;
+    su_cfg.enable_s_mode = true;
+    su_cfg.enable_u_mode = true;
+
+    {
+        TEST("mstatus S/U fields are present and WARL-legalized");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, 0xFFFFFFFFu);
+        uint32_t ms = sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_SIE);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_SPIE);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_SPP);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_MPRV);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_SUM);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_MXR);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_TVM);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_TW);
+        CHECK(ms & zicsr::CSRFile::MSTATUS_TSR);
+        CHECK_EQ(ms & zicsr::CSRFile::MSTATUS_MPP, zicsr::CSRFile::MSTATUS_MPP);
+        CHECK_EQ(ms & zicsr::CSRFile::MSTATUS_FS, zicsr::CSRFile::MSTATUS_FS);
+        PASS();
+    }
+
+    {
+        TEST("S/U CSR existence and MISA S/U bits");
+        auto sys = make_sys(4096, su_cfg);
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SSTATUS));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SIE));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::STVEC));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SEPC));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SCAUSE));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::STVAL));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SATP));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::MEDELEG));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::MIDELEG));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::MCOUNTEREN));
+        CHECK(sys.cpu.csrs.exists(zicsr::csr_addr::SCOUNTEREN));
+        uint32_t misa = sys.cpu.csrs.read(zicsr::csr_addr::MISA);
+        CHECK(misa & (1u << 18));  // S
+        CHECK(misa & (1u << 20));  // U
+        PASS();
+    }
+
+    {
+        TEST("ECALL from U/S/M reports correct cause when not delegated");
+        for (auto mode : {PrivilegeLevel::MACHINE,
+                          PrivilegeLevel::SUPERVISOR,
+                          PrivilegeLevel::USER}) {
+            auto sys = make_sys(4096, su_cfg);
+            uint32_t handler = 0x800u;
+            sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, handler);
+            enter_mode(sys, mode, 0x100u);
+            sys.memory.write32(0x100u, 0x00000073u);     // ecall
+            auto r = sys.step();
+            CHECK(r.trap);
+            uint32_t expected = (mode == PrivilegeLevel::MACHINE)   ? exception::ECALL_FROM_M :
+                                (mode == PrivilegeLevel::SUPERVISOR) ? exception::ECALL_FROM_S :
+                                                                          exception::ECALL_FROM_U;
+            CHECK_EQ(r.trap_cause, expected);
+            // Non-delegated traps land in M mode.
+            CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::MACHINE);
+            CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MCAUSE), expected);
+            CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MEPC), 0x100u);
+            uint32_t mpp = (sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS) >> 11) & 3u;
+            uint32_t expected_mpp = (mode == PrivilegeLevel::MACHINE) ? 3u :
+                                    (mode == PrivilegeLevel::SUPERVISOR) ? 1u : 0u;
+            CHECK_EQ(mpp, expected_mpp);
+        }
+        PASS();
+    }
+
+    {
+        TEST("Exception delegation: ECALL from U traps to S mode");
+        auto sys = make_sys(4096, su_cfg);
+        uint32_t m_handler = 0x800u;
+        uint32_t s_handler = 0x900u;
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, m_handler);
+        sys.cpu.csrs.write(zicsr::csr_addr::STVEC, s_handler);
+        // Delegate ECALL-from-U (cause 8) to S mode.
+        sys.cpu.csrs.write(zicsr::csr_addr::MEDELEG, 1u << 8);
+        enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+        sys.memory.write32(0x100u, 0x00000073u);     // ecall
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ECALL_FROM_U);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::SUPERVISOR);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SCAUSE), exception::ECALL_FROM_U);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SEPC), 0x100u);
+        CHECK_EQ(sys.cpu.pc, s_handler);
+        // SPP should be 0 because previous mode was U.
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS) & zicsr::CSRFile::MSTATUS_SPP, 0u);
+        PASS();
+    }
+
+    {
+        TEST("MRET returns to S/U and SRET returns to U");
+        auto sys = make_sys(4096, su_cfg);
+        // Drop to S mode.
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        // Trap from S back to M with ECALL-from-S.
+        sys.memory.write32(0x100u, 0x00000073u);     // ecall
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::MACHINE);
+        // The ECALL saved MEPC=0x100.  Move it past the ECALL, then MRET
+        // back to S.
+        sys.cpu.csrs.write(zicsr::csr_addr::MEPC, 0x104u);
+        sys.memory.write32(sys.cpu.pc, 0x30200073u); // mret
+        r = sys.step();
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::SUPERVISOR);
+        CHECK_EQ(sys.cpu.pc, 0x104u);
+        // SRET back to U.  SPP was 0 because the S->M trap does not save
+        // into SPP; the previous SPP was cleared on the M->S transition.
+        sys.cpu.csrs.write(zicsr::csr_addr::SEPC, 0x104u);
+        sys.memory.write32(sys.cpu.pc, 0x10200073u); // sret
+        r = sys.step();
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::USER);
+        CHECK_EQ(sys.cpu.pc, 0x104u);
+        PASS();
+    }
+
+    {
+        TEST("SRET illegal in U mode and when mstatus.TSR=1 in S mode");
+        auto sys = make_sys(4096, su_cfg);
+        // U mode SRET -> illegal
+        enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+        sys.memory.write32(0x100u, 0x10200073u);
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+
+        // S mode with TSR=1 -> illegal
+        sys.cpu.reset();
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS,
+            zicsr::CSRFile::MSTATUS_TSR | zicsr::CSRFile::MSTATUS_SIE);
+        sys.memory.write32(0x100u, 0x10200073u);
+        r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+
+        // S mode with TSR=0 -> allowed (no MMU effect).
+        sys.cpu.reset();
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.memory.write32(0x100u, 0x10200073u);
+        r = sys.step();
+        CHECK(!r.trap);
+        PASS();
+    }
+
+    {
+        TEST("WFI illegal in U mode and when mstatus.TW=1 in S mode");
+        auto sys = make_sys(4096, su_cfg);
+        // U mode WFI -> illegal
+        enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+        sys.memory.write32(0x100u, 0x10500073u);
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+
+        // S mode with TW=1 -> illegal
+        sys.cpu.reset();
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_TW);
+        sys.memory.write32(0x100u, 0x10500073u);
+        r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+
+        // S mode with TW=0 -> allowed.
+        sys.cpu.reset();
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.memory.write32(0x100u, 0x10500073u);
+        r = sys.step();
+        CHECK(!r.trap);
+        PASS();
+    }
+
+    {
+        TEST("SFENCE.VMA allowed in M/S; illegal with TVM=1 in S mode");
+        auto sys = make_sys(4096, su_cfg);
+        // M mode -> allowed
+        sys.memory.write32(sys.cpu.pc, 0x12000073u);
+        CHECK(!sys.step().trap);
+
+        // S mode, TVM=0 -> allowed
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.memory.write32(0x100u, 0x12000073u);
+        auto r = sys.step();
+        CHECK(!r.trap);
+
+        // S mode, TVM=1 -> illegal
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_TVM);
+        sys.memory.write32(sys.cpu.pc, 0x12000073u);
+        r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        PASS();
+    }
+
+    {
+        TEST("S-mode interrupt delegation and stvec vectored delivery");
+        auto sys = make_sys(4096, su_cfg);
+        uint32_t s_base = 0x900u;
+        sys.cpu.csrs.write(zicsr::csr_addr::STVEC, s_base | 1u); // vectored
+        // Delegate supervisor software interrupt to S mode.
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG, zicsr::CSRFile::MI_SSI);
+        // Enter S mode with SIE enabled and SSIP pending.
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_SSI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_SIE);
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        sys.cpu.set_supervisor_software_interrupt(true);
+        auto r = sys.step();
+        CHECK(r.interrupt);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::SUPERVISOR);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SCAUSE), exception::S_SOFTWARE_INTERRUPT);
+        CHECK_EQ(sys.cpu.pc, s_base + 4 * 1);
+        // SPP should be 1 because previous mode was S.
+        CHECK(sys.cpu.csrs.read(zicsr::csr_addr::MSTATUS) & zicsr::CSRFile::MSTATUS_SPP);
+        PASS();
+    }
+
+    {
+        TEST("sip/sie are subsets visible via mideleg");
+        auto sys = make_sys(4096, su_cfg);
+        // Delegate SSI and STI to S mode; leave SEI undelegated.
+        uint32_t deleg = zicsr::CSRFile::MI_SSI | zicsr::CSRFile::MI_STI;
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG, deleg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_MASK);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SIE), deleg);
+        // Write to sie should only affect delegated bits.
+        sys.cpu.csrs.write(zicsr::csr_addr::SIE, zicsr::CSRFile::MI_MASK);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIE) & zicsr::CSRFile::MI_MASK,
+                 zicsr::CSRFile::MI_MASK);
+        // But only the delegated bits appear back in sie.
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SIE), deleg);
+        PASS();
+    }
+
+    {
+        TEST("Counter access from U gated by mcounteren/scounteren");
+        uint32_t u_pc = 0x100u;
+        uint32_t inst = zicsr::encode::csrr(3, zicsr::csr_addr::CYCLE); // csrr x3, cycle
+
+        // Case 1: mcounteren.cycle = 0 -> trap
+        {
+            auto sys = make_sys(4096, su_cfg);
+            enter_mode(sys, PrivilegeLevel::USER, u_pc);
+            sys.memory.write32(u_pc, inst);
+            sys.cpu.csrs.write(zicsr::csr_addr::MCOUNTEREN, 0);
+            auto r = sys.step();
+            CHECK(r.trap);
+            CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        }
+
+        // Case 2: mcounteren.cycle = 1 but scounteren.cycle = 0 -> still trap in U
+        {
+            auto sys = make_sys(4096, su_cfg);
+            enter_mode(sys, PrivilegeLevel::USER, u_pc);
+            sys.memory.write32(u_pc, inst);
+            sys.cpu.csrs.write(zicsr::csr_addr::MCOUNTEREN, 1u);
+            sys.cpu.csrs.write(zicsr::csr_addr::SCOUNTEREN, 0);
+            auto r = sys.step();
+            CHECK(r.trap);
+            CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        }
+
+        // Case 3: both enabled -> success
+        {
+            auto sys = make_sys(4096, su_cfg);
+            enter_mode(sys, PrivilegeLevel::USER, u_pc);
+            sys.memory.write32(u_pc, inst);
+            sys.cpu.csrs.write(zicsr::csr_addr::MCOUNTEREN, 1u);
+            sys.cpu.csrs.write(zicsr::csr_addr::SCOUNTEREN, 1u);
+            auto r = sys.step();
+            CHECK(!r.trap);
+        }
+        PASS();
+    }
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1371,8 +1682,9 @@ int main() {
     test_rv32fc();
     test_zicsr();
     test_traps_interrupts();
+    test_supervisor_user_mode();
     test_integration();
-    
+
     printf("==================================\n");
     printf("%d tests, %d failures\n", g_tests, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -40,11 +40,11 @@ enum class InstrType {
     JAL, JALR,
     
     // System instructions
-    ECALL, EBREAK, MRET, WFI,
-    
+    ECALL, EBREAK, MRET, SRET, WFI, SFENCE_VMA,
+
     // Fence (FENCE.I is decoded by the separate Zifencei module)
     FENCE,
-    
+
     ILLEGAL
 };
 
@@ -82,6 +82,9 @@ struct ExecResult {
     uint32_t trap_cause;
     uint32_t trap_value;    // Value for mtval (faulting address / instruction)
     bool mret;              // Instruction was MRET (CPU performs the state change)
+    bool sret;              // Instruction was SRET
+    bool sfence_vma;        // Instruction was SFENCE.VMA
+    bool wfi;               // Instruction was WFI
     std::string trap_info;
 };
 
@@ -109,6 +112,9 @@ namespace opcode {
 
 class Decoder {
 public:
+    // Configuration: decode SRET/SFENCE.VMA only when S-mode is implemented.
+    bool s_mode_enabled = false;
+
     DecodedInstr decode(uint32_t instr) const {
         DecodedInstr d;
         d.raw = instr;
@@ -311,14 +317,25 @@ private:
     }
     
     void decode_system(DecodedInstr& d) const {
-        // Exact-match encodings only; everything else on SYSTEM/funct3=0
-        // (SRET, unsupported hypervisor ops, garbage) is illegal.
         if (d.funct3 == 0) {
             switch (d.raw) {
                 case 0x00000073: d.type = InstrType::ECALL;  break;
                 case 0x00100073: d.type = InstrType::EBREAK; break;
                 case 0x30200073: d.type = InstrType::MRET;   break;
                 case 0x10500073: d.type = InstrType::WFI;    break;
+                default:
+                    if (s_mode_enabled) {
+                        if (d.raw == 0x10200073u) {
+                            d.type = InstrType::SRET;
+                            break;
+                        }
+                        // SFENCE.VMA: funct7=0001001, funct3=0, rd=0, opcode=SYSTEM.
+                        if ((d.raw & 0xFE007FFFu) == 0x12000073u) {
+                            d.type = InstrType::SFENCE_VMA;
+                            // rs1 and rs2 are decoded already by decode()
+                        }
+                    }
+                    break;
             }
         }
     }
@@ -335,9 +352,11 @@ public:
     //   instruction-address-misaligned checks on jump/branch targets.
     // - allow_misaligned: when false, misaligned data accesses raise
     //   load/store-address-misaligned exceptions (causes 4/6).
+    // - priv: current privilege level, needed for ECALL encoding.
     bool c_ext_enabled = true;
     bool allow_misaligned = false;
-    
+    PrivilegeLevel priv = PrivilegeLevel::MACHINE;
+
     ExecResult execute(const DecodedInstr& instr, RegFile& regs, Bus& bus, uint32_t pc) const {
         ExecResult result;
         result.next_pc = pc + 4;
@@ -346,6 +365,9 @@ public:
         result.trap_cause = 0;
         result.trap_value = 0;
         result.mret = false;
+        result.sret = false;
+        result.sfence_vma = false;
+        result.wfi = false;
         
         uint32_t rs1_val = regs.read(instr.rs1);
         uint32_t rs2_val = regs.read(instr.rs2);
@@ -544,7 +566,12 @@ public:
             // System
             case InstrType::ECALL:
                 result.trap = true;
-                result.trap_cause = exception::ECALL_FROM_M;
+                if (priv == PrivilegeLevel::USER)
+                    result.trap_cause = exception::ECALL_FROM_U;
+                else if (priv == PrivilegeLevel::SUPERVISOR)
+                    result.trap_cause = exception::ECALL_FROM_S;
+                else
+                    result.trap_cause = exception::ECALL_FROM_M;
                 result.trap_value = 0;
                 result.trap_info = "ECALL";
                 break;
@@ -559,8 +586,14 @@ public:
                 // executor has no CSR access.
                 result.mret = true;
                 break;
+            case InstrType::SRET:
+                result.sret = true;
+                break;
+            case InstrType::SFENCE_VMA:
+                result.sfence_vma = true;
+                break;
             case InstrType::WFI:
-                // Legal implementation: execute as a NOP.
+                result.wfi = true;
                 break;
                 
             case InstrType::ILLEGAL:
@@ -682,12 +715,14 @@ inline std::string DecodedInstr::mnemonic() const {
         case InstrType::JAL:  return std::string("jal ") + rd_s + ", " + std::to_string(imm);
         case InstrType::JALR: return std::string("jalr ") + rd_s + ", " + rs1_s + ", " + std::to_string(imm);
         
-        case InstrType::ECALL:  return "ecall";
-        case InstrType::EBREAK: return "ebreak";
-        case InstrType::MRET:   return "mret";
-        case InstrType::WFI:    return "wfi";
-        case InstrType::FENCE:  return "fence";
-        case InstrType::ILLEGAL: return "ILLEGAL";
+        case InstrType::ECALL:      return "ecall";
+        case InstrType::EBREAK:     return "ebreak";
+        case InstrType::MRET:       return "mret";
+        case InstrType::SRET:       return "sret";
+        case InstrType::SFENCE_VMA: return "sfence.vma";
+        case InstrType::WFI:        return "wfi";
+        case InstrType::FENCE:      return "fence";
+        case InstrType::ILLEGAL:    return "ILLEGAL";
     }
     return "UNKNOWN";
 }

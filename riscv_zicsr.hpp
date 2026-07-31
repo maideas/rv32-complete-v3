@@ -146,17 +146,35 @@ public:
     using WriteCallback = std::function<void(uint16_t, uint32_t)>;
     
     // mstatus bit positions
+    static constexpr uint32_t MSTATUS_SIE  = 1u << 1;
     static constexpr uint32_t MSTATUS_MIE  = 1u << 3;
+    static constexpr uint32_t MSTATUS_SPIE = 1u << 5;
     static constexpr uint32_t MSTATUS_MPIE = 1u << 7;
-    static constexpr uint32_t MSTATUS_MPP  = 3u << 11;   // hardwired to 11 (M)
-    static constexpr uint32_t MSTATUS_FS   = 3u << 13;   // hardwired to 11 when F
+    static constexpr uint32_t MSTATUS_SPP  = 1u << 8;
+    static constexpr uint32_t MSTATUS_MPP  = 3u << 11;
+    static constexpr uint32_t MSTATUS_FS   = 3u << 13;   // hardwired to Dirty (11) when F
+    static constexpr uint32_t MSTATUS_MPRV = 1u << 17;
+    static constexpr uint32_t MSTATUS_SUM  = 1u << 18;
+    static constexpr uint32_t MSTATUS_MXR  = 1u << 19;
+    static constexpr uint32_t MSTATUS_TVM  = 1u << 20;
+    static constexpr uint32_t MSTATUS_TW   = 1u << 21;
+    static constexpr uint32_t MSTATUS_TSR  = 1u << 22;
     static constexpr uint32_t MSTATUS_SD   = 1u << 31;   // reflects FS == 11
-    
-    // mie/mip bit positions (M-mode interrupts only)
+
+    // mie/mip bit positions
+    static constexpr uint32_t MI_SSI = 1u << 1;
     static constexpr uint32_t MI_MSI = 1u << 3;
+    static constexpr uint32_t MI_STI = 1u << 5;
     static constexpr uint32_t MI_MTI = 1u << 7;
+    static constexpr uint32_t MI_SEI = 1u << 9;
     static constexpr uint32_t MI_MEI = 1u << 11;
-    static constexpr uint32_t MI_MASK = MI_MSI | MI_MTI | MI_MEI;
+
+    static constexpr uint32_t MI_MASK = MI_SSI | MI_MSI | MI_STI | MI_MTI | MI_SEI | MI_MEI;
+
+    uint32_t mip_writable_mask() const {
+        // MSIP is writable in every implementation; SSIP only when S-mode exists.
+        return s_mode_enabled ? (MI_MSI | MI_SSI) : MI_MSI;
+    }
 
 private:
     std::unordered_map<uint16_t, uint32_t> csrs;
@@ -164,15 +182,48 @@ private:
     ReadCallback read_callback;
     WriteCallback write_callback;
     bool f_extension = true;        // fflags/frm/fcsr exist and FS/SD are set
+    bool s_mode_enabled = false;      // true if Supervisor mode is implemented
+    bool u_mode_enabled = false;      // true if User mode is implemented
     uint32_t mepc_mask = ~1u;       // ~1 with C (IALIGN=16), ~3 without
-    
+
+    // Bits that are visible in sstatus (read) and writable through sstatus.
+    static constexpr uint32_t SSTATUS_READ_MASK =
+        MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
+        MSTATUS_MXR | MSTATUS_SUM | MSTATUS_FS | MSTATUS_SD;
+    static constexpr uint32_t SSTATUS_WRITE_MASK =
+        MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
+        MSTATUS_MXR | MSTATUS_SUM;
+
     uint32_t mstatus_hardwired() const {
-        // MPP is hardwired to M (11); FS is hardwired to Dirty (11) and SD
-        // to 1 when the F extension is present (a legal WARL choice for an
-        // implementation that does not track FP context state).
-        uint32_t hw = MSTATUS_MPP;
+        // FS is hardwired to Dirty (11) and SD to 1 when the F extension is
+        // present (a legal WARL choice for an implementation that does not
+        // track FP context state).
+        uint32_t hw = 0;
         if (f_extension) hw |= MSTATUS_FS | MSTATUS_SD;
         return hw;
+    }
+
+    uint32_t mstatus_legal_mask() const {
+        uint32_t mask = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
+                        MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPP |
+                        MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR |
+                        MSTATUS_TVM | MSTATUS_TW | MSTATUS_TSR;
+        if (!s_mode_enabled) {
+            mask &= ~(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
+                      MSTATUS_SUM | MSTATUS_TVM | MSTATUS_TSR);
+            mask &= ~MSTATUS_TW;  // no S/U mode for WFI timeout to affect
+        }
+        if (!u_mode_enabled) {
+            mask &= ~(MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_TW);
+        }
+        return mask;
+    }
+
+    uint32_t legalize_mpp(uint32_t mpp) const {
+        if (mpp == 2) mpp = 3;              // reserved -> Machine
+        if (!u_mode_enabled && mpp == 0) mpp = 3;
+        if (!s_mode_enabled && mpp == 1) mpp = 3;
+        return mpp;
     }
     
     void init_storage() {
@@ -196,7 +247,7 @@ private:
         csrs[csr_addr::MENVCFGH] = 0;
         
         // Machine trap setup / handling
-        csrs[csr_addr::MSTATUS] = mstatus_hardwired();
+        csrs[csr_addr::MSTATUS] = mstatus_hardwired() | MSTATUS_MPP; // MPP = M
         csrs[csr_addr::MTVEC] = 0;
         csrs[csr_addr::MIE] = 0;
         csrs[csr_addr::MEPC] = 0;
@@ -204,7 +255,28 @@ private:
         csrs[csr_addr::MTVAL] = 0;
         csrs[csr_addr::MSCRATCH] = 0;
         csrs[csr_addr::MIP] = 0;
-        
+
+        // Machine delegation and counter enables
+        if (s_mode_enabled || u_mode_enabled) {
+            csrs[csr_addr::MEDELEG] = 0;
+            csrs[csr_addr::MIDELEG] = 0;
+        }
+        csrs[csr_addr::MCOUNTEREN] = 0;
+
+        // Supervisor CSRs
+        if (s_mode_enabled) {
+            csrs[csr_addr::SSTATUS] = 0;
+            csrs[csr_addr::SIE] = 0;
+            csrs[csr_addr::STVEC] = 0;
+            csrs[csr_addr::SCOUNTEREN] = 0;
+            csrs[csr_addr::SSCRATCH] = 0;
+            csrs[csr_addr::SEPC] = 0;
+            csrs[csr_addr::SCAUSE] = 0;
+            csrs[csr_addr::STVAL] = 0;
+            csrs[csr_addr::SIP] = 0;
+            csrs[csr_addr::SATP] = 0;
+        }
+
         // Machine counters
         csrs[csr_addr::MCYCLE] = 0;
         csrs[csr_addr::MCYCLEH] = 0;
@@ -223,11 +295,17 @@ public:
         f_extension = enabled;
         // Re-legalize mstatus hardwired fields
         uint32_t v = csrs[csr_addr::MSTATUS];
-        v &= MSTATUS_MIE | MSTATUS_MPIE;
+        v &= mstatus_legal_mask();
         csrs[csr_addr::MSTATUS] = v | mstatus_hardwired();
     }
-    
+
     bool has_f_extension() const { return f_extension; }
+
+    void set_s_mode(bool enabled) { s_mode_enabled = enabled; }
+    bool has_s_mode() const { return s_mode_enabled; }
+
+    void set_u_mode(bool enabled) { u_mode_enabled = enabled; }
+    bool has_u_mode() const { return u_mode_enabled; }
     
     // IALIGN=16 (C enabled) -> mask ~1; IALIGN=32 -> mask ~3
     void set_mepc_mask(uint32_t mask) { mepc_mask = mask; }
@@ -251,6 +329,8 @@ public:
             // Read-only counter shadows alias the machine counters
             case csr_addr::CYCLE:
             case csr_addr::CYCLEH:
+            case csr_addr::TIME:
+            case csr_addr::TIMEH:
             case csr_addr::INSTRET:
             case csr_addr::INSTRETH:
                 return true;
@@ -258,18 +338,48 @@ public:
                 return csrs.find(addr) != csrs.end();
         }
     }
-    
+
     bool can_read(uint16_t addr) const {
         auto perm = CSRPermissions::from_address(addr);
-        return static_cast<uint8_t>(current_privilege) >= 
-               static_cast<uint8_t>(perm.min_privilege);
+        if (static_cast<uint8_t>(current_privilege) <
+            static_cast<uint8_t>(perm.min_privilege)) {
+            return false;
+        }
+        if (is_counter_csr(addr)) return counter_readable(addr);
+        return true;
     }
-    
+
     bool can_write(uint16_t addr) const {
         auto perm = CSRPermissions::from_address(addr);
         if (!perm.writable) return false;
-        return static_cast<uint8_t>(current_privilege) >= 
+        return static_cast<uint8_t>(current_privilege) >=
                static_cast<uint8_t>(perm.min_privilege);
+    }
+
+    // Counter CSR access helpers -----------------------------------------
+    static bool is_counter_csr(uint16_t addr) {
+        return (addr == csr_addr::CYCLE)   || (addr == csr_addr::CYCLEH) ||
+               (addr == csr_addr::TIME)    || (addr == csr_addr::TIMEH)  ||
+               (addr == csr_addr::INSTRET) || (addr == csr_addr::INSTRETH);
+    }
+
+    static uint8_t counter_index(uint16_t addr) { return static_cast<uint8_t>(addr & 0x1F); }
+
+    bool counter_readable(uint16_t addr) const {
+        if (current_privilege == PrivilegeLevel::MACHINE) return true;
+
+        auto it = csrs.find(csr_addr::MCOUNTEREN);
+        uint32_t mcen = (it != csrs.end()) ? it->second : 0;
+        uint8_t idx = counter_index(addr);
+        if (((mcen >> idx) & 1u) == 0u) return false;
+
+        if (current_privilege == PrivilegeLevel::SUPERVISOR) return true;
+
+        // USER: scounteren bit must also be set if S-mode is implemented.
+        if (!s_mode_enabled) return false;
+        auto its = csrs.find(csr_addr::SCOUNTEREN);
+        uint32_t scen = (its != csrs.end()) ? its->second : 0;
+        return ((scen >> idx) & 1u) != 0u;
     }
     
     /**
@@ -289,8 +399,13 @@ public:
             case csr_addr::FRM:     return (read_raw(csr_addr::FCSR) >> 5) & 0x7;
             case csr_addr::CYCLE:   return read_raw(csr_addr::MCYCLE);
             case csr_addr::CYCLEH:  return read_raw(csr_addr::MCYCLEH);
+            case csr_addr::TIME:    return read_raw(csr_addr::MCYCLE);
+            case csr_addr::TIMEH:   return read_raw(csr_addr::MCYCLEH);
             case csr_addr::INSTRET: return read_raw(csr_addr::MINSTRET);
             case csr_addr::INSTRETH:return read_raw(csr_addr::MINSTRETH);
+            case csr_addr::SSTATUS: return read_raw(csr_addr::MSTATUS) & SSTATUS_READ_MASK;
+            case csr_addr::SIE:     return read_raw(csr_addr::MIE) & get(csr_addr::MIDELEG);
+            case csr_addr::SIP:     return read_raw(csr_addr::MIP) & get(csr_addr::MIDELEG);
             default:                return read_raw(addr);
         }
     }
@@ -329,9 +444,11 @@ public:
                 break;
             
             case csr_addr::MSTATUS: {
-                // Writable: MIE, MPIE. MPP/FS/SD are hardwired; all other
-                // fields are read-only zero in this M-only configuration.
-                uint32_t v = value & (MSTATUS_MIE | MSTATUS_MPIE);
+                uint32_t v = value & mstatus_legal_mask();
+                uint32_t mpp = (v >> 11) & 3u;
+                mpp = legalize_mpp(mpp);
+                v &= ~MSTATUS_MPP;
+                v |= (mpp << 11);
                 csrs[csr_addr::MSTATUS] = v | mstatus_hardwired();
                 break;
             }
@@ -357,11 +474,74 @@ public:
             case csr_addr::MIE:
                 csrs[csr_addr::MIE] = value & MI_MASK;
                 break;
-            case csr_addr::MIP:
-                // MEIP/MTIP/MSIP are set by interrupt sources, not by CSR
-                // writes: mip is read-only through CSR instructions here.
+            case csr_addr::MIP: {
+                uint32_t mip = get(csr_addr::MIP);
+                uint32_t wmask = mip_writable_mask();
+                csrs[csr_addr::MIP] = (mip & ~wmask) | (value & wmask);
                 break;
-            
+            }
+            case csr_addr::MEDELEG:
+                csrs[csr_addr::MEDELEG] = value & 0xFFFFu;
+                break;
+            case csr_addr::MIDELEG:
+                csrs[csr_addr::MIDELEG] = value & MI_MASK;
+                break;
+            case csr_addr::MCOUNTEREN:
+                csrs[csr_addr::MCOUNTEREN] = value;
+                break;
+
+            // Supervisor aliases and CSRs
+            case csr_addr::SSTATUS: {
+                uint32_t mstatus = get(csr_addr::MSTATUS);
+                uint32_t v = (mstatus & ~SSTATUS_WRITE_MASK) | (value & SSTATUS_WRITE_MASK);
+                v &= ~MSTATUS_SD;
+                csrs[csr_addr::MSTATUS] = (v & mstatus_legal_mask()) | mstatus_hardwired();
+                break;
+            }
+            case csr_addr::SIE: {
+                if (!s_mode_enabled) break;
+                uint32_t deleg = get(csr_addr::MIDELEG);
+                uint32_t mie = get(csr_addr::MIE);
+                csrs[csr_addr::MIE] = (mie & ~deleg) | (value & deleg & MI_MASK);
+                break;
+            }
+            case csr_addr::SIP: {
+                if (!s_mode_enabled) break;
+                uint32_t deleg = get(csr_addr::MIDELEG);
+                uint32_t mip = get(csr_addr::MIP);
+                uint32_t wmask = mip_writable_mask();
+                csrs[csr_addr::MIP] = (mip & ~deleg) | (value & deleg & wmask);
+                break;
+            }
+            case csr_addr::STVEC: {
+                uint32_t mode = value & 0x3;
+                if (mode > 1) mode = 0;
+                csrs[csr_addr::STVEC] = (value & ~0x3u) | mode;
+                break;
+            }
+            case csr_addr::SEPC:
+                csrs[csr_addr::SEPC] = value & mepc_mask;
+                break;
+            case csr_addr::SCAUSE:
+                csrs[csr_addr::SCAUSE] = value;
+                break;
+            case csr_addr::STVAL:
+                csrs[csr_addr::STVAL] = value;
+                break;
+            case csr_addr::SSCRATCH:
+                csrs[csr_addr::SSCRATCH] = value;
+                break;
+            case csr_addr::SATP: {
+                uint32_t mode = value >> 31;
+                if (mode > 1) mode = 0;     // Bare or Sv32 only
+                csrs[csr_addr::SATP] = (value & 0x7FFFFFFFu) | (mode << 31);
+                break;
+            }
+            case csr_addr::SCOUNTEREN:
+                csrs[csr_addr::SCOUNTEREN] = value;
+                break;
+
+
             default:
                 csrs[addr] = value;
                 break;

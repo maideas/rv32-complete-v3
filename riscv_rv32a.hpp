@@ -287,7 +287,7 @@ public:
             }
             
             case InstrType::AMOADD_W: {
-                // Atomic add: rd = mem[rs1]; mem[rs1] = rd + rs2
+                // Atomic add: rd = mem[rs1]; mem[rs1] = mem[rs1] + rs2
                 uint32_t old_val = bus.read32(addr);
                 uint32_t new_val = old_val + rs2_val;
                 bus.write32(addr, new_val);

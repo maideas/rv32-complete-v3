@@ -47,7 +47,7 @@ struct DecodedInstr {
     InstrType type;
     uint32_t raw;
     
-    // FENCE.I has no meaningful operands - imm, rs1, rd should all be 0
+    // FENCE.I has no meaningful operands - imm, rs1, and rd should all be 0,
     // but implementations must ignore them
     uint8_t rd;
     uint8_t rs1;

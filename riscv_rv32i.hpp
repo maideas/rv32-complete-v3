@@ -332,7 +332,7 @@ private:
                         // SFENCE.VMA: funct7=0001001, funct3=0, rd=0, opcode=SYSTEM.
                         if ((d.raw & 0xFE007FFFu) == 0x12000073u) {
                             d.type = InstrType::SFENCE_VMA;
-                            // rs1 and rs2 are decoded already by decode()
+                            // rs1 and rs2 are already decoded by decode()
                         }
                     }
                     break;
@@ -352,7 +352,7 @@ public:
     //   instruction-address-misaligned checks on jump/branch targets.
     // - allow_misaligned: when false, misaligned data accesses raise
     //   load/store-address-misaligned exceptions (causes 4/6).
-    // - priv: current privilege level, needed for ECALL encoding.
+    // - priv: current privilege level, needed to select the ECALL cause.
     bool c_ext_enabled = true;
     bool allow_misaligned = false;
     PrivilegeLevel priv = PrivilegeLevel::MACHINE;

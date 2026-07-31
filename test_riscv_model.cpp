@@ -858,7 +858,7 @@ static void test_zicsr() {
     printf("I. Zicsr\n");
     
     {
-        TEST("Unimplemented CSRs trap (0x7C0, sscratch); time is alias of mcycle");
+        TEST("Unimplemented CSRs trap (0x7C0, sscratch); time is an alias of mcycle");
         auto sys = make_sys();
         auto csrr = [](uint16_t csr, uint8_t rd) {
             return (uint32_t(csr) << 20) | (2u << 12) | (uint32_t(rd) << 7) | 0x73u;
@@ -873,7 +873,7 @@ static void test_zicsr() {
         sys.memory.write32(4, csrr(0x140, 1));            // sscratch (S-mode)
         CHECK(sys.step().trap);
         sys.cpu.pc = 8;
-        sys.memory.write32(8, csrr(0xC01, 1));            // time is now alias
+        sys.memory.write32(8, csrr(0xC01, 1));            // time is now an alias
         auto mcycle_before = sys.cpu.csrs.read(zicsr::csr_addr::MCYCLE);
         CHECK(!sys.step().trap);
         CHECK_EQ(sys.cpu.regs.read(1), mcycle_before);

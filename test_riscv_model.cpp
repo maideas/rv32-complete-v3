@@ -7,7 +7,10 @@
  *     (decode strictness, C.JALR ordering, Zicond encoding, CSR behavior,
  *      F-extension corner cases, counters, traps, ...)
  *   - Full-CPU integration of all extensions (dispatch, traps, interrupts,
- *     MRET, misalignment policy, access faults)
+ *     MRET/SRET, misalignment policy, access faults)
+ *   - Supervisor/User mode support (trap delegation, S-mode interrupts,
+ *     interrupt prioritization/gating, sstatus subset, SATP TVM,
+ *     MRET/SRET legality)
  *   - Opcode-generator round trips for every extension
  *
  * Build:

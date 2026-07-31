@@ -2,7 +2,7 @@
  * RISC-V RV32IMAFC_Zicsr_Zifencei_Zba_Zbb_Zbs_Zicond CPU Model
  * 
  * Top-level CPU model integrating:
- *   - RV32I Base Integer Instruction Set (incl. MRET / WFI)
+ *   - RV32I Base Integer Instruction Set (incl. MRET / SRET / SFENCE.VMA / WFI)
  *   - M  Extension (Multiply-Divide)
  *   - A  Extension (Atomics: LR/SC and AMOs)
  *   - F  Extension (Single-Precision Floating-Point, incl. compressed
@@ -13,12 +13,16 @@
  *   - Zba / Zbb / Zbs (Bit-Manipulation)
  *   - Zicond   (Conditional Zero)
  * 
- * Machine-mode-only hart with:
- *   - Synchronous exception handling (mepc/mcause/mtval/mstatus update,
- *     redirection to mtvec) — execution continues in the trap handler.
- *   - M-mode interrupts (MEI/MSI/MTI) with mstatus.MIE / mie / mip gating
- *     and vectored-mtvec support.
- *   - Precise mtval values (faulting address / instruction).
+ * Machine-mode hart with optional Supervisor and User modes
+ * (CPUConfig::enable_s_mode / enable_u_mode):
+ *   - Synchronous exception handling (xepc/xcause/xtval/xstatus update,
+ *     redirection to mtvec/stvec) — execution continues in the trap handler.
+ *   - Trap delegation from S/U to S mode via medeleg/mideleg.
+ *   - M-mode interrupts (MEI/MSI/MTI) and S-mode interrupts (SEI/SSI/STI)
+ *     with mstatus.MIE/SIE / mie / mip gating and vectored-mtvec/stvec
+ *     support; standard priority order MEI > MSI > MTI > SEI > SSI > STI.
+ *   - MRET/SRET privilege transitions and the sstatus subset of mstatus.
+ *   - Precise mtval/stval values (faulting address / instruction).
  *   - 16-bit-granular instruction fetch, so a compressed instruction in
  *     the last halfword of memory does not over-fetch.
  * 

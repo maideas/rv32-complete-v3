@@ -17,7 +17,8 @@ keep the suite warning- and UBSan-clean.
 ## Project layout
 
 - `riscv_common.hpp` — shared types (Bus, RegFile, memory helpers, exceptions)
-- `riscv_cpu.hpp` — full CPU integrating all extensions
+- `riscv_cpu.hpp` — full CPU integrating all extensions (M-mode hart with
+  optional S/U modes: trap delegation, S-mode interrupts, MRET/SRET)
 - `riscv_<ext>.hpp` — decoder/executor per extension
   (rv32i/m/a/c/f/fc, zicsr, zifencei, zba, zbb, zbs, zicond)
 - `riscv_<ext>_opgen.hpp` — random opcode generators per extension (test stimulus)

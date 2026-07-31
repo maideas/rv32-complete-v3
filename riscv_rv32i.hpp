@@ -1,7 +1,10 @@
 /*******************************************************************************
  * RISC-V RV32I Base Integer Instruction Set Model
  * 
- * Decoder and executor for all 40 RV32I instructions.
+ * Decoder and executor for all 40 RV32I instructions, plus decoding of
+ * the privileged instructions MRET, SRET, SFENCE.VMA and WFI (their
+ * state changes are performed by the top-level CPU; SRET/SFENCE.VMA
+ * decode only when S-mode is enabled).
  * Uses injected Bus interface for memory access.
  ******************************************************************************/
 

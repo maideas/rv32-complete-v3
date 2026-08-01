@@ -850,6 +850,30 @@ static void test_rv32f() {
         PASS();
     }
     {
+        TEST("FLW/FSW negative immediates are sign-extended correctly");
+        // Regression: the 12-bit immediate was sign-extended from bit 12
+        // instead of bit 11, turning negative offsets into large positive
+        // ones (flw f9, -164(s5) computed s5 + 3932).
+        rv32f::Decoder dec;
+        CHECK_EQ(dec.decode(rv32f::encode::flw(10, 5, -4)).imm, -4);
+        CHECK_EQ(dec.decode(rv32f::encode::fsw(10, 5, -8)).imm, -8);
+        CHECK_EQ(dec.decode(rv32f::encode::flw(10, 5, -2048)).imm, -2048);
+        CHECK_EQ(dec.decode(rv32f::encode::flw(10, 5, 2047)).imm, 2047);
+
+        auto sys = make_sys();
+        sys.cpu.regs.write(5, 0x400);
+        sys.memory.write32(0x3FC, f2b(1.0f));
+        sys.memory.write32(0, rv32f::encode::flw(10, 5, -4));  // flw f10, -4(x5)
+        auto r = sys.step();
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.fregs.read_bits(10), f2b(1.0f));
+        sys.memory.write32(4, rv32f::encode::fsw(10, 5, -8));  // fsw f10, -8(x5)
+        r = sys.step();
+        CHECK(!r.trap);
+        CHECK_EQ(sys.memory.read32(0x3F8), f2b(1.0f));
+        PASS();
+    }
+    {
         TEST("FMADD single-rounding and FCLASS through the CPU");
         auto sys = make_sys();
         sys.cpu.fregs.write_bits(1, f2b(3.0f));
@@ -1446,10 +1470,16 @@ static void test_integration() {
             auto res = sys.cpu.step(sys.memory);
             if (res.trap) {
                 // Misaligned FLW/FSW from random offsets are expected and
-                // architecturally correct; anything else is a bug.
+                // architecturally correct; x0-based FLW/FSW with a negative
+                // offset correctly access-fault outside the test memory
+                // (rs1 = x0 is never re-anchored). Anything else is a bug.
                 bool mem_trap = res.trap_cause == exception::LOAD_ADDR_MISALIGNED ||
                                 res.trap_cause == exception::STORE_ADDR_MISALIGNED;
-                if (!mem_trap) {
+                bool x0_access_fault =
+                    (res.trap_cause == exception::LOAD_ACCESS_FAULT ||
+                     res.trap_cause == exception::STORE_ACCESS_FAULT) &&
+                    ((op >> 15) & 0x1F) == 0;
+                if (!mem_trap && !x0_access_fault) {
                     printf("FAIL\n        F trap cause %u on %08X (%s)\n",
                            res.trap_cause, op, res.mnemonic.c_str());
                     g_failures++;
@@ -2543,6 +2573,114 @@ static void test_opgen_coverage() {
         }
         CHECK(hints > 1000);      // ~50% expected
         CHECK(canonical > 1500);
+        PASS();
+    }
+    {
+        TEST("Valid opgen stimulus never traps as illegal (cause 2)");
+        // Every extension's valid generator executed on the CPU: no sample
+        // may raise an illegal-instruction exception. Data-trap-free
+        // environment (all regs = 0x800 in 4 KiB RAM, misaligned allowed),
+        // so for most streams NO trap at all is expected; the exceptions
+        // are ECALL/EBREAK (valid instructions that trap by design).
+        const int K = 3000;
+        auto preset = [](System& sys) {
+            for (int i = 1; i < 32; i++) sys.cpu.regs.write(i, 0x800);
+        };
+        auto run = [&](uint32_t op, System& sys) {
+            preset(sys);
+            sys.cpu.pc = 0x40;
+            return sys.cpu.step(sys.memory, op);
+        };
+
+        // RV32I full stream: only ECALL (11) / EBREAK (3) may trap.
+        // Exception: x0-based loads/stores use address = imm directly and
+        // may legitimately access-fault (5/7) outside the test memory.
+        {
+            CPUConfig cfg; cfg.allow_misaligned_data = true;
+            auto sys = make_sys(4096, cfg);
+            rv32i::opgen::OpcodeGenerator g(401);
+            for (int k = 0; k < K; k++) {
+                uint32_t op = g.generate_random();
+                auto r = run(op, sys);
+                CHECK(r.trap_cause != exception::ILLEGAL_INSTRUCTION);
+                bool x0_data_trap = r.trap &&
+                    (r.trap_cause == 5 || r.trap_cause == 7) &&
+                    ((op >> 15) & 0x1F) == 0;
+                CHECK(!r.trap || r.trap_cause == 11 || r.trap_cause == 3 ||
+                      x0_data_trap);
+            }
+        }
+        // RV32C full stream: only C.EBREAK (3) may trap.
+        {
+            auto sys = make_sys(4096);
+            rv32c::opgen::OpcodeGenerator g(402);
+            for (int k = 0; k < K; k++) {
+                auto r = run(g.generate_random(), sys);
+                CHECK(r.trap_cause != exception::ILLEGAL_INSTRUCTION);
+                CHECK(!r.trap || r.trap_cause == 3);
+            }
+        }
+        // Register-only streams: never trap at all.
+        {
+            auto sys = make_sys(4096);
+            rv32m::opgen::OpcodeGenerator g(403);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        {
+            auto sys = make_sys(4096);
+            zba::opgen::OpcodeGenerator g(404);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        {
+            auto sys = make_sys(4096);
+            zbb::opgen::OpcodeGenerator g(405);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        {
+            auto sys = make_sys(4096);
+            zbs::opgen::OpcodeGenerator g(406);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        {
+            auto sys = make_sys(4096);
+            zicond::opgen::OpcodeGenerator g(407);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        // A stream with aligned in-bounds addresses: never traps.
+        {
+            auto sys = make_sys(4096);
+            rv32a::opgen::OpcodeGenerator g(408);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
+        // F and Zcf streams (loads/stores included): no trap with the
+        // data-safe environment; fresh frm = 0 keeps rm = DYN legal.
+        {
+            CPUConfig cfg; cfg.allow_misaligned_data = true;
+            auto sys = make_sys(4096, cfg);
+            rv32f::opgen::OpcodeGenerator g(409);
+            for (int k = 0; k < K; k++) {
+                uint32_t op = g.generate_random();
+                auto r = run(op, sys);
+                // x0-based FLW/FSW may legitimately access-fault (5/7)
+                bool x0_data_trap = r.trap &&
+                    (r.trap_cause == 5 || r.trap_cause == 7) &&
+                    ((op >> 15) & 0x1F) == 0;
+                CHECK(!r.trap || x0_data_trap);
+            }
+        }
+        {
+            CPUConfig cfg; cfg.allow_misaligned_data = true;
+            auto sys = make_sys(4096, cfg);
+            rv32fc::opgen::OpcodeGenerator g(410);
+            for (int k = 0; k < K; k++)
+                CHECK(!run(g.generate_random(), sys).trap);
+        }
         PASS();
     }
     {

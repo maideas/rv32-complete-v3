@@ -377,15 +377,17 @@ public:
             case opcode::LOAD_FP:
                 if (d.funct3 == funct3::W) {
                     d.type = InstrType::FLW;
-                    d.imm = sign_extend(bits(instr, 31, 20), 12);
+                    // 12-bit immediate: sign bit is at position 11
+                    d.imm = sign_extend(bits(instr, 31, 20), 11);
                 }
                 break;
                 
             case opcode::STORE_FP:
                 if (d.funct3 == funct3::W) {
                     d.type = InstrType::FSW;
+                    // 12-bit immediate: sign bit is at position 11
                     d.imm = sign_extend(
-                        (bits(instr, 31, 25) << 5) | bits(instr, 11, 7), 12);
+                        (bits(instr, 31, 25) << 5) | bits(instr, 11, 7), 11);
                 }
                 break;
                 

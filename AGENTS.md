@@ -22,4 +22,6 @@ keep the suite warning- and UBSan-clean.
 - `riscv_<ext>.hpp` — decoder/executor per extension
   (rv32i/m/a/c/f/fc, zicsr, zifencei, zba, zbb, zbs, zicond)
 - `riscv_<ext>_opgen.hpp` — random opcode generators per extension (test stimulus)
+- `riscv_illegal_opgen.hpp` — spec-table-derived invalid-encoding generator
+  (decoder-strictness stimulus; HINT encodings are valid, never emitted)
 - `test_riscv_model.cpp` — the test suite

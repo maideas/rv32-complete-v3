@@ -170,8 +170,10 @@ private:
                       d.imm = nzimm;
                       if (d.imm & 0x200) d.imm |= 0xFFFFFC00;
                     }
-                } else if (d.rd != 0) {
-                    // C.LUI with nzimm = 0 is a reserved encoding.
+                } else {
+                    // C.LUI with nzimm = 0 is a reserved encoding. With
+                    // rd = x0 and nzimm != 0 it is a HINT: it executes as
+                    // a NOP because the write to x0 is discarded.
                     uint32_t nzimm6 = ((instr >> 2) & 0x1F) | (((instr >> 12) & 0x1) << 5);
                     if (nzimm6 != 0) {
                         d.type = InstrType::C_LUI;

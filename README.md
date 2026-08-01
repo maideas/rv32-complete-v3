@@ -135,11 +135,19 @@ configuration (keeping stimulus trap-free), and the Zifencei generator
 emits the canonical FENCE.I unless `set_standard_only(false)` is used to
 randomize the spec-ignored rd/rs1/imm fields.
 
+Complementing the valid-opcode generators, `riscv_illegal_opgen.hpp`
+generates *invalid* encodings derived from the specification's encoding
+tables (canonical illegal patterns, reserved major opcodes, per-family
+constraint violations, compressed reserved encodings) for checking that
+an implementation rejects every one of them with a precise
+illegal-instruction exception and no side effects. HINT encodings are
+deliberately excluded — they are valid NOPs.
+
 ### Tests and docs
 
 | File | Description |
 |---|---|
-| `test_riscv_model.cpp` | The test suite: regression tests for every fixed bug, full-CPU integration tests (dispatch, traps, interrupts, MRET/SRET, misalignment, access faults, interrupt prioritization/gating, `sstatus` subset, SATP/TVM, MRET legality), opcode-generator round trips for all extensions, and opgen coverage tests (every instruction type generated, operand fields spanning their full valid ranges, CSR address pools). Minimal built-in harness (TEST/CHECK macros), no external framework. |
+| `test_riscv_model.cpp` | The test suite: regression tests for every fixed bug, full-CPU integration tests (dispatch, traps, interrupts, MRET/SRET, misalignment, access faults, interrupt prioritization/gating, `sstatus` subset, SATP/TVM, MRET legality), opcode-generator round trips for all extensions, opgen coverage tests (every instruction type generated, operand fields spanning their full valid ranges, CSR address pools), and illegal-opcode stimulus (all constructed invalid encodings trap precisely and side-effect-free, exhaustive 16-bit parcel sweep with HINT whitelist, disabled-extension config matrix). Minimal built-in harness (TEST/CHECK macros), no external framework. |
 | `Makefile` | Builds the test suite into `build/` and runs it (`make test`). |
 | [AGENTS.md](AGENTS.md) | Project conventions for AI coding agents (layout, build/test rules). |
 | [notes.md](doc/notes.md) | Design Q&A notes on RISC-V hardware implementation: extension priorities for cache-less systems, dual-issue of compressed instructions, and serial execution in debug mode. |

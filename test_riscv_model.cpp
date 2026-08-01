@@ -17,6 +17,10 @@
  *   - Opgen coverage: every extension's generator must produce every
  *     instruction type with all operand fields spanning their full valid
  *     ranges (type histograms, immediate extremes, CSR address pools)
+ *   - Illegal-opcode stimulus: spec-table-derived invalid encodings must
+ *     all trap with cause 2, precise mtval, and no architectural side
+ *     effects; full 16-bit parcel sweep with HINT whitelist; disabled-
+ *     extension config matrix
  *
  * Build:
  *   g++ -std=c++17 -Wall -Wextra -Wpedantic -fsanitize=undefined \
@@ -36,6 +40,7 @@
 #include "riscv_zbb_opgen.hpp"
 #include "riscv_zbs_opgen.hpp"
 #include "riscv_zicond_opgen.hpp"
+#include "riscv_illegal_opgen.hpp"
 
 #include <cfenv>
 #include <cmath>
@@ -397,6 +402,19 @@ static void test_rv32c() {
         // ...and the valid variants remain valid
         CHECK(dec.decode(0x8082).type == rv32c::InstrType::C_JR);    // c.jr ra
         CHECK(dec.decode(0x4082).type == rv32c::InstrType::C_LWSP);   // c.lwsp x1
+        PASS();
+    }
+    {
+        TEST("C.LUI x0 with nzimm != 0 is a HINT (executes as NOP)");
+        auto sys = make_sys();
+        sys.memory.write16(0, 0x6005);   // c.lui x0, 1
+        auto r = sys.step();
+        CHECK(!r.trap);
+        CHECK_EQ(sys.cpu.pc, 2u);
+        sys.memory.write16(4, 0x707D);   // c.lui x0, -1
+        sys.cpu.pc = 4;
+        r = sys.step();
+        CHECK(!r.trap);
         PASS();
     }
     {
@@ -2486,6 +2504,321 @@ static void test_opgen_coverage() {
     }
 }
 
+// ============================================================================
+// N. Illegal-opcode stimulus
+//
+// Every encoding produced by riscv_illegal_opgen.hpp is invalid per the
+// spec's encoding tables (independent of the model's decoders) and must
+// trap with cause 2, xtval = instruction bits, xepc = faulting pc, and
+// no architectural side effects. The full 16-bit parcel space is swept
+// exhaustively, with an explicit whitelist of HINT encodings that must
+// execute as NOPs. The config matrix checks that encodings valid with an
+// extension enabled become illegal when it is disabled.
+// ============================================================================
+
+// Check the full trap contract for one injected encoding on a fresh CPU.
+// Returns false (printing diagnostics) on any violation.
+static bool check_illegal(System& sys, uint32_t op, bool compressed,
+                          const char* context) {
+    const uint32_t TRAP_PC = 0x40, TVEC = 0x200;
+    sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, TVEC);
+    for (int i = 1; i < 32; i++) sys.cpu.regs.write(i, TRAP_PC + i * 4);
+    sys.cpu.csrs.write(zicsr::csr_addr::FCSR, 0xA5);   // flags + frm preset
+    for (uint32_t a = 0; a < 0x40; a += 4)
+        sys.memory.write32(a, 0xDEAD0000u + a);        // store sentinel
+    sys.cpu.pc = TRAP_PC;
+
+    auto r = sys.cpu.step(sys.memory, op);
+
+    uint32_t expected_mtval = compressed ? (op & 0xFFFFu) : op;
+    bool ok = r.trap &&
+              r.trap_cause == exception::ILLEGAL_INSTRUCTION &&
+              r.trap_value == expected_mtval &&
+              sys.cpu.csrs.get(zicsr::csr_addr::MCAUSE) ==
+                  exception::ILLEGAL_INSTRUCTION &&
+              sys.cpu.csrs.get(zicsr::csr_addr::MEPC) == TRAP_PC &&
+              sys.cpu.pc == TVEC &&
+              sys.cpu.csrs.read(zicsr::csr_addr::FCSR) == 0xA5u &&
+              !sys.cpu.reservation.has_reservation();
+    if (ok) {
+        for (int i = 1; i < 32 && ok; i++)
+            ok = (sys.cpu.regs.read(i) == TRAP_PC + i * 4);
+        for (uint32_t a = 0; a < 0x40 && ok; a += 4)
+            ok = (sys.memory.read32(a) == 0xDEAD0000u + a);
+        ok = ok && sys.cpu.fregs.read_bits(0) == 0 &&
+                   sys.cpu.fregs.read_bits(17) == 0;
+    }
+    if (!ok) {
+        printf("FAIL\n        %s: encoding 0x%08X -> trap=%d cause=%u "
+               "mtval=0x%X pc=0x%X\n",
+               context, op, r.trap, r.trap_cause, r.trap_value, sys.cpu.pc);
+    }
+    return ok;
+}
+
+static void test_illegal_opcodes() {
+    printf("N. Illegal-opcode stimulus\n");
+
+    {
+        TEST("Constructed illegal encodings all trap precisely, side-effect free");
+        size_t n_classes;
+        auto* table = illegal_opgen::classes(n_classes);
+        illegal_opgen::RNG rng(201);
+        for (size_t c = 0; c < n_classes; c++) {
+            for (int k = 0; k < 300; k++) {
+                System sys(4096);
+                uint32_t op = table[c].gen(rng);
+                CHECK(check_illegal(sys, op, table[c].compressed, table[c].name));
+            }
+        }
+        PASS();
+    }
+
+    {
+        TEST("16-bit parcel sweep: precise trap contract for all 65536 encodings");
+        System sys(4096);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x200u);
+        for (uint32_t p = 0; p < 65536; p++) {
+            for (int i = 1; i < 32; i++) sys.cpu.regs.write(i, 0x100 + i * 4);
+            sys.cpu.pc = 0x40;
+            auto r = sys.cpu.step(sys.memory, p);
+            if (!r.trap) continue;               // valid instruction / HINT
+            // Legitimate trap causes for arbitrary parcels: illegal (2),
+            // breakpoint (3, c.ebreak), misaligned data (4/6), data access
+            // fault (5/7), ecall from M (11, parcel 0x0073).
+            CHECK(r.trap_cause == 2 || r.trap_cause == 3 ||
+                  r.trap_cause == 4 || r.trap_cause == 5 ||
+                  r.trap_cause == 6 || r.trap_cause == 7 ||
+                  r.trap_cause == 11);
+            if (r.trap_cause == exception::ILLEGAL_INSTRUCTION) {
+                CHECK_EQ(r.trap_value, p);       // mtval = faulting parcel
+                for (int i = 1; i < 32; i++)     // no register side effects
+                    CHECK_EQ(sys.cpu.regs.read(i), 0x100u + i * 4);
+            }
+        }
+        PASS();
+    }
+
+    {
+        TEST("Compressed HINT encodings execute as NOPs (whitelist)");
+        // Per the C spec these are valid HINTs, not illegal instructions.
+        const uint16_t hints[] = {
+            0x0001,   // c.nop
+            0x0005,   // c.addi x0, 1
+            0x107D,   // c.addi x0, -1
+            0x4005,   // c.li x0, 1
+            0x6005,   // c.lui x0, 1     (HINT; was mis-trapped before the fix)
+            0x707D,   // c.lui x0, -1    (HINT)
+            0x8006,   // c.mv x0, x1
+            0x0006,   // c.slli x0, 1
+            0x0082,   // c.slli x1, 0    (c.slli64 HINT)
+            0x8001,   // c.srli x8, 0    (c.srli64 HINT)
+            0x8401,   // c.srai x8, 0    (c.srai64 HINT)
+        };
+        for (uint16_t h : hints) {
+            System sys(4096);
+            sys.cpu.pc = 0x40;
+            auto r = sys.cpu.step(sys.memory, h);
+            if (r.trap) {
+                printf("FAIL\n        HINT 0x%04X trapped (cause %u)\n",
+                       h, r.trap_cause);
+                g_failures++;
+                return;
+            }
+        }
+        PASS();
+    }
+
+    {
+        TEST("Reserved compressed spot checks trap with mtval = parcel");
+        const uint16_t bad[] = {
+            0x0000,   // canonical illegal
+            0x6101,   // c.addi16sp nzimm = 0
+            0x6001,   // c.lui x1, 0 (nzimm = 0)
+            0x4002,   // c.lwsp x0, 0(sp)
+            0x8002,   // c.jr x0
+        };
+        for (uint16_t b : bad) {
+            System sys(4096);
+            sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x200u);
+            sys.cpu.pc = 0x40;
+            auto r = sys.cpu.step(sys.memory, b);
+            CHECK(r.trap);
+            CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+            CHECK_EQ(r.trap_value, (uint32_t)b);
+        }
+        PASS();
+    }
+
+    {
+        TEST("Disabled extensions make their encodings illegal (config matrix)");
+        // Each case: valid stimulus from the extension's own opgen must
+        // trap as illegal on a CPU with that extension disabled.
+
+        // C disabled: every compressed encoding is illegal (mtval = parcel)
+        {
+            CPUConfig cfg; cfg.enable_c_extension = false;
+            rv32c::opgen::OpcodeGenerator g(301);
+            for (int k = 0; k < 400; k++) {
+                System sys(4096, cfg);
+                uint16_t op = g.generate_random();
+                sys.cpu.pc = 0x40;
+                auto r = sys.cpu.step(sys.memory, op);
+                CHECK(r.trap);
+                CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+                CHECK_EQ(r.trap_value, (uint32_t)op);
+            }
+        }
+        // F disabled: FP and compressed-FP encodings are illegal
+        {
+            CPUConfig cfg; cfg.enable_f_extension = false;
+            rv32f::opgen::OpcodeGenerator g(302);
+            for (int k = 0; k < 400; k++) {
+                System sys(4096, cfg);
+                uint32_t op = g.generate_random();
+                CHECK(check_illegal(sys, op, false, "F disabled"));
+            }
+            rv32fc::opgen::OpcodeGenerator gc(303);
+            for (int k = 0; k < 200; k++) {
+                System sys(4096, cfg);
+                uint16_t op = gc.generate_random();
+                sys.cpu.pc = 0x40;
+                auto r = sys.cpu.step(sys.memory, op);
+                CHECK(r.trap);
+                CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+            }
+        }
+        // M / A disabled
+        {
+            CPUConfig cfg; cfg.enable_m_extension = false;
+            rv32m::opgen::OpcodeGenerator g(304);
+            for (int k = 0; k < 300; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "M disabled"));
+            }
+        }
+        {
+            CPUConfig cfg; cfg.enable_a_extension = false;
+            rv32a::opgen::OpcodeGenerator g(305);
+            for (int k = 0; k < 300; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "A disabled"));
+            }
+        }
+        // Zicsr disabled
+        {
+            CPUConfig cfg; cfg.enable_zicsr = false;
+            zicsr::opgen::OpcodeGenerator g(306);
+            for (int k = 0; k < 300; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zicsr disabled"));
+            }
+        }
+        // Zifencei disabled: FENCE.I (incl. nonzero ignored fields) illegal
+        {
+            CPUConfig cfg; cfg.enable_zifencei = false;
+            zifencei::opgen::OpcodeGenerator g(307);
+            g.set_standard_only(false);
+            for (int k = 0; k < 100; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zifencei disabled"));
+            }
+        }
+        // Zba / Zbb / Zbs / Zicond disabled
+        {
+            CPUConfig cfg; cfg.enable_zba = false;
+            zba::opgen::OpcodeGenerator g(308);
+            for (int k = 0; k < 200; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zba disabled"));
+            }
+        }
+        {
+            CPUConfig cfg; cfg.enable_zbb = false;
+            zbb::opgen::OpcodeGenerator g(309);
+            for (int k = 0; k < 200; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zbb disabled"));
+            }
+        }
+        {
+            CPUConfig cfg; cfg.enable_zbs = false;
+            zbs::opgen::OpcodeGenerator g(310);
+            for (int k = 0; k < 200; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zbs disabled"));
+            }
+        }
+        {
+            CPUConfig cfg; cfg.enable_zicond = false;
+            zicond::opgen::OpcodeGenerator g(311);
+            for (int k = 0; k < 200; k++) {
+                System sys(4096, cfg);
+                CHECK(check_illegal(sys, g.generate_random(), false, "Zicond disabled"));
+            }
+        }
+        PASS();
+    }
+
+    {
+        TEST("SRET/SFENCE.VMA legality follows the S-mode configuration");
+        // Default (no S-mode): both are illegal encodings here.
+        {
+            System sys(4096);
+            CHECK(check_illegal(sys, 0x10200073u, false, "SRET, no S-mode"));
+        }
+        {
+            System sys(4096);
+            CHECK(check_illegal(sys, 0x12000073u, false, "SFENCE.VMA, no S-mode"));
+        }
+        // With S-mode: SFENCE.VMA executes as a NOP in M-mode, and SRET
+        // performs the privilege transition to SPP (here: U).
+        {
+            CPUConfig cfg;
+            cfg.enable_s_mode = true;
+            cfg.enable_u_mode = true;
+            auto sys = make_sys(4096, cfg);
+            sys.cpu.pc = 0x40;
+            auto r = sys.cpu.step(sys.memory, 0x12000073u);   // sfence.vma
+            CHECK(!r.trap);
+            CHECK_EQ(sys.cpu.pc, 0x44u);
+
+            sys.cpu.csrs.write(zicsr::csr_addr::SEPC, 0x80u);
+            sys.cpu.pc = 0x40;
+            r = sys.cpu.step(sys.memory, 0x10200073u);        // sret (SPP=0)
+            CHECK(!r.trap);
+            CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::USER);
+            CHECK_EQ(sys.cpu.pc, 0x80u);
+        }
+        PASS();
+    }
+
+    {
+        TEST("Random 32-bit words: precise trap contract (robustness)");
+        std::mt19937 rng(312);
+        System sys(4096);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x200u);
+        for (int k = 0; k < 20000; k++) {
+            uint32_t op = rng();
+            for (int i = 1; i < 32; i++) sys.cpu.regs.write(i, 0x100 + i * 4);
+            sys.cpu.pc = 0x40;
+            auto r = sys.cpu.step(sys.memory, op);
+            if (!r.trap) continue;
+            CHECK(r.trap_cause == 2 || r.trap_cause == 3 ||
+                  r.trap_cause == 4 || r.trap_cause == 5 ||
+                  r.trap_cause == 6 || r.trap_cause == 7 ||
+                  r.trap_cause == 11);
+            if (r.trap_cause == exception::ILLEGAL_INSTRUCTION) {
+                bool compressed = ((op & 0x3) != 0x3);
+                CHECK_EQ(r.trap_value, compressed ? (op & 0xFFFFu) : op);
+                for (int i = 1; i < 32; i++)
+                    CHECK_EQ(sys.cpu.regs.read(i), 0x100u + i * 4);
+            }
+        }
+        PASS();
+    }
+}
+
 int main() {
     printf("RISC-V reference model test suite\n");
     printf("==================================\n");
@@ -2504,6 +2837,7 @@ int main() {
     test_integration();
     test_step_opcode_injection();
     test_opgen_coverage();
+    test_illegal_opcodes();
 
     printf("==================================\n");
     printf("%d tests, %d failures\n", g_tests, g_failures);

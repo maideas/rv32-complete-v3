@@ -25,6 +25,8 @@
  *   - Precise mtval/stval values (faulting address / instruction).
  *   - 16-bit-granular instruction fetch, so a compressed instruction in
  *     the last halfword of memory does not over-fetch.
+ *   - Optional opcode-injection stepping (step(bus, opcode)) that bypasses
+ *     instruction fetch for cosimulation / trace replay / direct stimulus.
  * 
  * Uses the injected Bus interface for all memory access. Bus errors
  * (riscv::BusFault or any std::exception) become access-fault exceptions.
@@ -220,39 +222,15 @@ public:
     // ========================================================================
     // Single Step Execution
     // ========================================================================
-    
+
+    // Fetch the instruction at pc from the bus and execute it.
     CPUExecResult step(Bus& bus) {
-        // Keep the executors' cheap flags in sync so that toggling
-        // config.allow_misaligned_data (or enable_c_extension for IALIGN)
-        // between steps takes effect without a reset. NOTE: changing
-        // extension *enables* or anything reflected in CSRs (MISA, FS/SD,
-        // mepc mask) still requires reset().
-        sync_executor_config();
-        
         CPUExecResult result;
-        result.pc = pc;
-        result.next_pc = pc;
-        result.instruction = 0;
-        result.branch_taken = false;
-        result.trap = false;
-        result.interrupt = false;
-        result.trap_cause = 0;
-        result.trap_value = 0;
-        result.instr_size = 4;
-        
+        if (begin_step(result)) return result;   // interrupt taken
+
         // --------------------------------------------------------------
-        // 1. Interrupts are sampled before instruction fetch.
-        // --------------------------------------------------------------
-        if (take_pending_interrupt(result)) {
-            pc = result.next_pc;
-            bump_cycle();
-            // No instruction was retired: minstret is not incremented.
-            return result;
-        }
-        
-        // --------------------------------------------------------------
-        // 2. Fetch (16-bit granular so that a compressed instruction in
-        //    the last halfword of memory does not over-fetch).
+        // Fetch (16-bit granular so that a compressed instruction in
+        // the last halfword of memory does not over-fetch).
         // --------------------------------------------------------------
         uint16_t parcel0;
         try {
@@ -263,10 +241,10 @@ public:
             finish_step(result);
             return result;
         }
-        
+
         uint32_t instr = parcel0;
         bool is_32bit = ((parcel0 & 0x3) == 0x3);
-        
+
         if (is_32bit) {
             uint16_t parcel1;
             try {
@@ -282,25 +260,26 @@ public:
             instr |= static_cast<uint32_t>(parcel1) << 16;
         }
         result.instruction = instr;
-        
-        // --------------------------------------------------------------
-        // 3. Decode & execute
-        // --------------------------------------------------------------
-        if (!is_32bit) {
-            result.instr_size = 2;
-            if (!config.enable_c_extension) {
-                result.mnemonic = "ILLEGAL";
-                take_exception(result, exception::ILLEGAL_INSTRUCTION,
-                               parcel0, "Illegal instruction (C disabled)");
-                finish_step(result);
-                return result;
-            }
-            execute_compressed(static_cast<uint16_t>(parcel0), bus, result);
-        } else {
-            execute_32bit(instr, bus, result);
-        }
-        
-        finish_step(result);
+
+        execute_fetched(instr, is_32bit, bus, result);
+        return result;
+    }
+
+    // Execute a caller-supplied opcode instead of fetching from the bus
+    // (compressed or 32-bit, selected by the two low bits as usual).
+    // Useful for cosimulation, trace replay, and direct opcode injection;
+    // the bus is still used for data loads/stores and interrupts are still
+    // sampled first. Because no fetch happens, instruction access faults
+    // cannot occur on this path and fetch side effects are not modeled.
+    // The caller keeps pc coherent with the injected stream.
+    CPUExecResult step(Bus& bus, uint32_t opcode) {
+        CPUExecResult result;
+        if (begin_step(result)) return result;   // interrupt taken
+
+        bool is_32bit = ((opcode & 0x3) == 0x3);
+        result.instruction = opcode;
+
+        execute_fetched(opcode, is_32bit, bus, result);
         return result;
     }
     
@@ -392,6 +371,63 @@ public:
     }
 
 private:
+    // ========================================================================
+    // Step prologue shared by both step() overloads.
+    // Keeps the executors' cheap flags in sync so that toggling
+    // config.allow_misaligned_data (or enable_c_extension for IALIGN)
+    // between steps takes effect without a reset. NOTE: changing
+    // extension *enables* or anything reflected in CSRs (MISA, FS/SD,
+    // mepc mask) still requires reset().
+    // Initializes the result record and samples pending interrupts
+    // (interrupts are taken before fetch/execution).
+    // Returns true if an interrupt was taken and the step is complete.
+    // ========================================================================
+
+    bool begin_step(CPUExecResult& result) {
+        sync_executor_config();
+
+        result.pc = pc;
+        result.next_pc = pc;
+        result.instruction = 0;
+        result.branch_taken = false;
+        result.trap = false;
+        result.interrupt = false;
+        result.trap_cause = 0;
+        result.trap_value = 0;
+        result.instr_size = 4;
+
+        if (take_pending_interrupt(result)) {
+            pc = result.next_pc;
+            bump_cycle();
+            // No instruction was retired: minstret is not incremented.
+            return true;
+        }
+        return false;
+    }
+
+    // ========================================================================
+    // Decode & execute an already-fetched instruction, then finish the step.
+    // ========================================================================
+
+    void execute_fetched(uint32_t instr, bool is_32bit, Bus& bus,
+                         CPUExecResult& result) {
+        if (!is_32bit) {
+            result.instr_size = 2;
+            if (!config.enable_c_extension) {
+                result.mnemonic = "ILLEGAL";
+                take_exception(result, exception::ILLEGAL_INSTRUCTION,
+                               instr & 0xFFFFu, "Illegal instruction (C disabled)");
+                finish_step(result);
+                return;
+            }
+            execute_compressed(static_cast<uint16_t>(instr), bus, result);
+        } else {
+            execute_32bit(instr, bus, result);
+        }
+
+        finish_step(result);
+    }
+
     // ========================================================================
     // Configuration propagation to the sub-executors
     // ========================================================================

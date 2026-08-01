@@ -181,6 +181,12 @@ float    f0 = sys.cpu.fregs.read(0);              // FP registers
 uint32_t mstatus = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
 ```
 
+- `step(Bus&, uint32_t opcode)` executes a caller-supplied opcode
+  (compressed or 32-bit, selected by the two low bits) instead of
+  fetching — useful for cosimulation, trace replay and direct stimulus.
+  Interrupts are still sampled first and the bus is still used for data
+  accesses, but no fetch occurs (so no instruction access faults and no
+  fetch side effects); the caller keeps `pc` coherent with the stream.
 - Handled traps redirect to `xTVEC` and execution **continues** in the
   handler; pass `stop_on_trap = true` to `run()` to stop at the first
   trap/interrupt instead.

@@ -12,6 +12,8 @@
  *     interrupt prioritization/gating, sstatus subset, SATP TVM,
  *     MRET/SRET legality)
  *   - Opcode-generator round trips for every extension
+ *   - Opcode-injection stepping (step(bus, opcode): no fetch, data access
+ *     via bus, traps/interrupts, equivalence with fetched execution)
  *
  * Build:
  *   g++ -std=c++17 -Wall -Wextra -Wpedantic -fsanitize=undefined \
@@ -1905,6 +1907,119 @@ static void test_supervisor_user_mode() {
 }
 
 // ============================================================================
+// L. Opcode-injection stepping (step(bus, opcode))
+// ============================================================================
+
+// Bus that counts fetch accesses, to prove injection performs none.
+class FetchCountingBus : public SimpleMemory {
+public:
+    int fetches = 0;
+    using SimpleMemory::SimpleMemory;
+    uint16_t fetch16(uint32_t addr) override {
+        fetches++;
+        return SimpleMemory::fetch16(addr);
+    }
+    uint32_t fetch32(uint32_t addr) override {
+        fetches++;
+        return SimpleMemory::fetch32(addr);
+    }
+};
+
+static void test_step_opcode_injection() {
+    printf("L. Opcode-injection stepping\n");
+
+    {
+        TEST("Injected 32-bit opcode executes without any bus fetch");
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        auto r = cpu.step(bus, 0x00500093u);   // addi x1, x0, 5
+        CHECK(!r.trap && !r.interrupt);
+        CHECK_EQ(r.instr_size, 4u);
+        CHECK(r.mnemonic == "addi ra, zero, 5");
+        CHECK_EQ(cpu.regs.read(1), 5u);
+        CHECK_EQ(cpu.pc, 4u);
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+    {
+        TEST("Injected compressed opcode executes with instr_size 2");
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        auto r = cpu.step(bus, 0x0089u);   // c.addi x1, 2  (funct3=000,q1)
+        CHECK(!r.trap);
+        CHECK_EQ(r.instr_size, 2u);
+        CHECK_EQ(cpu.regs.read(1), 2u);
+        CHECK_EQ(cpu.pc, 2u);
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+    {
+        TEST("Injected load still uses the bus for data access");
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        cpu.regs.write(1, 0x100);
+        bus.write32(0x100, 0xCAFEBABE);
+        auto r = cpu.step(bus, 0x0000A103u);   // lw x2, 0(x1)
+        CHECK(!r.trap);
+        CHECK_EQ(cpu.regs.read(2), 0xCAFEBABEu);
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+    {
+        TEST("Injected ecall traps to mtvec like a fetched one");
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        auto r = cpu.step(bus, 0x00000073u);   // ecall
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ECALL_FROM_M);
+        CHECK_EQ(cpu.pc, 0x800u);
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+    {
+        TEST("Interrupts are still sampled before injected execution");
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_MIE);
+        cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_MTI);
+        cpu.set_timer_interrupt(true);
+        auto r = cpu.step(bus, 0x00500093u);   // addi must NOT execute
+        CHECK(r.interrupt);
+        CHECK_EQ(r.trap_cause, exception::M_TIMER_INTERRUPT);
+        CHECK_EQ(cpu.pc, 0x800u);
+        CHECK_EQ(cpu.regs.read(1), 0u);
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+    {
+        TEST("Injected stream matches fetched execution state-for-state");
+        const uint32_t prog[] = {
+            0x00500093u,   // addi x1, x0, 5
+            0x00608113u,   // addi x2, x1, 6
+            0x002101B3u,   // add  x3, x2, x2
+        };
+        System sys(4096);
+        sys.load_program(0, prog, 3);
+        sys.run(3);
+
+        FetchCountingBus bus(4096);
+        CPU cpu;
+        for (uint32_t op : prog) cpu.step(bus, op);
+
+        CHECK_EQ(cpu.regs.read(1), sys.cpu.regs.read(1));
+        CHECK_EQ(cpu.regs.read(2), sys.cpu.regs.read(2));
+        CHECK_EQ(cpu.regs.read(3), sys.cpu.regs.read(3));
+        CHECK_EQ(cpu.pc, sys.cpu.pc);
+        CHECK_EQ(cpu.csrs.get(zicsr::csr_addr::MINSTRET),
+                 sys.cpu.csrs.get(zicsr::csr_addr::MINSTRET));
+        CHECK_EQ(bus.fetches, 0);
+        PASS();
+    }
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1924,6 +2039,7 @@ int main() {
     test_traps_interrupts();
     test_supervisor_user_mode();
     test_integration();
+    test_step_opcode_injection();
 
     printf("==================================\n");
     printf("%d tests, %d failures\n", g_tests, g_failures);

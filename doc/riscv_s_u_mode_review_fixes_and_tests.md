@@ -2,6 +2,18 @@
 
 This session reviewed the uncommitted Supervisor/User-mode implementation in the RV32 reference model, found and fixed two privileged-spec deviations (M-mode exception delegation, medeleg[11] writability) plus MRET's MPP reset behavior, and expanded the test suite from 88 to 98 tests. The changes were committed via a feature branch merged into main. It also added two pi slash commands (/gg for the git graph, /export-md converted from a skill) and cleaned up comment grammar.
 
+> **Errata (later review, 111-test state):** a subsequent full-model review
+> found and fixed five more spec deviations that this session's review had
+> accepted as sound: JALR with `funct3 != 0` decoded as JALR instead of
+> trapping; the LR/SC reservation was not cleared on trap entry; `mip`
+> STIP/SEIP were not software-writable and `sip` writes were not limited
+> to SSIP (the "mip write mask ... all sound" claim below); interrupts
+> targeting M-mode did not take precedence over delegated S-target ones
+> (the "priority order ... is correct" claim below); and U-mode counter
+> access without S-mode was wrongly denied despite `mcounteren` (the
+> "untested edge configuration" noted below). See `riscv_csr_reference.md`
+> for the current behavior.
+
 ## User
 
 > please analyze the files in this directory and have a look at the local changes. evaluate the changes and check them for correctness and completeness. do not commit anything yet.

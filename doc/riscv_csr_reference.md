@@ -89,7 +89,7 @@ exception. M-mode reads are always allowed.
 | 0x303 | `mideleg` | Interrupt delegation to S-mode. Same existence rule; only the six standard interrupt bits (SSIP/MSIP/STIP/MTIP/SEIP/MEIP) are writable |
 | 0x304 | `mie` | Interrupt enables; writes masked to the six standard bits |
 | 0x305 | `mtvec` | M-mode trap vector. BASE in bits [31:2]; MODE in [1:0]: 0=Direct, 1=Vectored — reserved modes (2, 3) are legalized to Direct (WARL) |
-| 0x306 | `mcounteren` | Enables `cycle`/`time`/`instret` reads from S (and, via `scounteren`, U). Reset 0 = blocked |
+| 0x306 | `mcounteren` | Enables `cycle`/`time`/`instret` reads from S and U (U-mode reads additionally need the `scounteren` bit when S-mode exists; without S-mode `mcounteren` alone gates U). Reset 0 = blocked |
 | 0x310 | `mstatush` | WARL all-zero (little-endian hart) |
 | 0x30A | `menvcfg` | WARL all-zero (no environment-config features) |
 | 0x31A | `menvcfgh` | WARL all-zero |
@@ -102,7 +102,7 @@ exception. M-mode reads are always allowed.
 | 0x341 | `mepc` | Exception PC. Writes are masked: `~1` with the C extension (IALIGN=16), `~3` without (WARL) |
 | 0x342 | `mcause` | Trap cause: Interrupt bit [31] + exception code in [30:0] |
 | 0x343 | `mtval` | Trap-specific value (precise; see below) |
-| 0x344 | `mip` | Interrupt pending. MSIP is always writable; SSIP only when S-mode exists. MTIP/MEIP/STIP/SEIP bits are driven by the CPU's level-sensitive interrupt input lines |
+| 0x344 | `mip` | Interrupt pending. MSIP is always software-writable; SSIP/STIP/SEIP are also software-writable when S-mode exists. The CPU's level-sensitive interrupt input lines drive the same bits via the `set()` backdoor (both options are spec-sanctioned). MTIP/MEIP are read-only (platform-driven) |
 
 ### Machine counters
 
@@ -141,7 +141,7 @@ exception. M-mode reads are always allowed.
 | 18 | SUM | Permit S-mode access to U-mode pages (exists with S and U) |
 | 19 | MXR | Make executable readable (exists with U) |
 | 20 | TVM | Trap S-mode `satp` accesses and `SFENCE.VMA` (exists with S) |
-| 21 | TW | Timeout wait: trap WFI in S/U (exists with S or U) |
+| 21 | TW | Timeout wait: trap WFI in S/U (writable when S and U are both enabled; WARL zero otherwise) |
 | 22 | TSR | Trap SRET executed in S-mode (exists with S) |
 | 31 | SD | Read-only summary: set because FS=Dirty with F |
 
@@ -174,13 +174,17 @@ M-mode are never delegated; without S-mode everything goes to M), then:
 
 Execution **continues** in the handler (the model does not halt).
 Trapped instructions do not retire: `minstret` is not incremented,
-`mcycle` is.
+`mcycle` is. Taking any trap (exception or interrupt, to M or S) also
+clears the LR/SC load reservation, as the A extension requires — an
+SC in the handler after an LR in the trapped code fails.
 
 **Precise `xtval` values:**
 
 | Exception | `xtval` |
 |---|---|
+| Instruction address misaligned (jump/branch target) | Faulting target address |
 | Instruction/load/store access fault, misaligned load/store | Faulting address |
+| Breakpoint (EBREAK, C.EBREAK) | Address of the EBREAK instruction |
 | Partial-instruction fetch fault (second parcel) | Address of the faulting parcel (`pc + 2`); `xepc` still points at the instruction start |
 | Illegal instruction | The faulting instruction bits |
 | ECALL | 0 (unspecified fields are written zero) |
@@ -195,15 +199,17 @@ taken from M-mode with MIE=0, and lower-privilege targets are skipped
 while in M-mode) performs the same state update as an exception, with:
 
 - `xcause` = Interrupt bit set | cause code (priority order
-  **MEI > MSI > MTI > SEI > SSI > STI**);
+  **MEI > MSI > MTI > SEI > SSI > STI** within a target privilege;
+  interrupts targeting M-mode take precedence over any interrupts
+  targeting S-mode, regardless of cause priority);
 - `xtval` = 0; `xepc` = PC of the *next* instruction;
 - PC ← vectored dispatch: in vectored mode `BASE + 4 × cause`, in
   direct mode `BASE` (both `mtvec` and `stvec` support MODE=1);
 - no instruction retires (`minstret` unchanged, `mcycle` incremented,
   `CPUExecResult::instr_size = 0`).
 
-`mideleg` routes S-interrupts (and via the gating rules also the
-decision of where they are taken) to S-mode; interrupts targeting M
+`mideleg` routes delegated interrupts to S-mode (they are then taken
+only in S/U, subject to the SIE gating rules); traps taken in M-mode
 are never delegated.
 
 ### MRET

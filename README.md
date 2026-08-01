@@ -35,7 +35,7 @@ the directory to your include path and `#include "riscv_cpu.hpp"`.
 |---|---|
 | **RV32I** | All 40 base instructions: LUI, AUIPC, JAL, JALR, BEQ/BNE/BLT/BGE/BLTU/BGEU, LB/LH/LW/LBU/LHU, SB/SH/SW, ADDI/SLTI/SLTIU/XORI/ORI/ANDI, SLLI/SRLI/SRAI, ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND, FENCE, ECALL, EBREAK. |
 | **M** | MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU. |
-| **A** | LR.W, SC.W (with reservation tracking) and all nine AMOs: AMOSWAP.W, AMOADD.W, AMOXOR.W, AMOAND.W, AMOOR.W, AMOMIN.W, AMOMAX.W, AMOMINU.W, AMOMAXU.W. aq/rl ordering bits are decoded (no observable effect in a single-hart model). |
+| **A** | LR.W, SC.W (with reservation tracking; the reservation is cleared on any taken trap, per the spec) and all nine AMOs: AMOSWAP.W, AMOADD.W, AMOXOR.W, AMOAND.W, AMOOR.W, AMOMIN.W, AMOMAX.W, AMOMINU.W, AMOMAXU.W. aq/rl ordering bits are decoded (no observable effect in a single-hart model). |
 | **F** | FLW, FSW, FADD.S, FSUB.S, FMUL.S, FDIV.S, FSQRT.S, FMIN.S, FMAX.S, FMADD.S, FMSUB.S, FNMADD.S, FNMSUB.S, FCVT.W.S, FCVT.WU.S, FCVT.S.W, FCVT.S.WU, FMV.X.W, FMV.W.X, FEQ.S, FLT.S, FLE.S, FSGNJ.S, FSGNJN.S, FSGNJX.S, FCLASS.S, with `fflags`/`frm`/`fcsr` interaction. |
 | **C** | All 16-bit compressed instructions (quadrants 0–2): C.ADDI4SPN, C.LW, C.SW, C.NOP, C.ADDI, C.JAL, C.LI, C.ADDI16SP, C.LUI, C.SRLI, C.SRAI, C.ANDI, C.SUB, C.XOR, C.OR, C.AND, C.J, C.BEQZ, C.BNEZ, C.SLLI, C.LWSP, C.JR, C.MV, C.EBREAK, C.JALR, C.ADD, C.SWSP. |
 | **Zcf** | C.FLW, C.FSW, C.FLWSP, C.FSWSP (compressed FP loads/stores, require F+C). |
@@ -65,7 +65,9 @@ the directory to your include path and `#include "riscv_cpu.hpp"`.
 - **Interrupts**: MEI/MSI/MTI (M-mode) and SEI/SSI/STI (S-mode), level-
   sensitive input lines driving `mip`, gated by `mie`/`mstatus.xIE` with
   the architectural global-enable rules, standard priority order
-  MEI > MSI > MTI > SEI > SSI > STI, and vectored `mtvec`/`stvec` support.
+  MEI > MSI > MTI > SEI > SSI > STI within a target privilege (interrupts
+  targeting M-mode take precedence over any targeting S-mode), and
+  vectored `mtvec`/`stvec` support.
 - **CSR file**: machine/supervisor/user CSRs per privileged spec v1.12 —
   trap setup and handling, counters (`mcycle`/`minstret` with read-only
   `cycle`/`instret` shadows; `time` aliases `mcycle`), delegation and

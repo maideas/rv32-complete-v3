@@ -153,9 +153,13 @@ public:
                 break;
                 
             case opcode::JALR:
-                d.type = InstrType::JALR;
+                // funct3 must be 000; all other funct3 values on the JALR
+                // opcode are reserved and must trap as illegal.
                 d.format = InstrFormat::I_TYPE;
-                d.imm = decode_i_imm(instr);
+                if (d.funct3 == 0b000) {
+                    d.type = InstrType::JALR;
+                    d.imm = decode_i_imm(instr);
+                }
                 break;
                 
             case opcode::BRANCH:

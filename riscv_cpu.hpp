@@ -20,7 +20,9 @@
  *   - Trap delegation from S/U to S mode via medeleg/mideleg.
  *   - M-mode interrupts (MEI/MSI/MTI) and S-mode interrupts (SEI/SSI/STI)
  *     with mstatus.MIE/SIE / mie / mip gating and vectored-mtvec/stvec
- *     support; standard priority order MEI > MSI > MTI > SEI > SSI > STI.
+ *     support; standard priority order MEI > MSI > MTI > SEI > SSI > STI
+ *     within a target privilege, M-target interrupts taking precedence
+ *     over S-target ones regardless of cause priority.
  *   - MRET/SRET privilege transitions and the sstatus subset of mstatus.
  *   - Precise mtval/stval values (faulting address / instruction).
  *   - 16-bit-granular instruction fetch, so a compressed instruction in
@@ -719,7 +721,11 @@ private:
         return false;
     }
 
+    // The A extension requires the hart's load reservation to be cleared
+    // whenever a trap (exception or interrupt) is taken, so an SC in a
+    // trap handler after an LR in trapped code must fail.
     void enter_m_trap(uint32_t cause, uint32_t tval, uint32_t trap_pc) {
+        reservation.clear();
         uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
         bool old_mie = (mstatus & zicsr::CSRFile::MSTATUS_MIE) != 0;
         mstatus &= ~(zicsr::CSRFile::MSTATUS_MIE |
@@ -737,6 +743,7 @@ private:
     }
 
     void enter_s_trap(uint32_t cause, uint32_t tval, uint32_t trap_pc) {
+        reservation.clear();
         uint32_t mstatus = csrs.get(zicsr::csr_addr::MSTATUS);
         bool old_sie = (mstatus & zicsr::CSRFile::MSTATUS_SIE) != 0;
         mstatus &= ~(zicsr::CSRFile::MSTATUS_SIE |
@@ -760,13 +767,20 @@ private:
         uint32_t pending = mip & mie;
         if (!pending) return false;
 
+        // Standard priority order within a target privilege:
+        // MEI > MSI > MTI > SEI > SSI > STI. Per the priv spec, interrupts
+        // targeting M-mode take priority over any interrupts targeting
+        // S-mode, so scan twice: M-target interrupts first, then S-target
+        // (this matters only when some M-cause interrupts are delegated).
         static const uint32_t priority[] = {11, 3, 7, 9, 1, 5};
+        for (int pass = 0; pass < 2; ++pass) {
         for (uint32_t code : priority) {
             uint32_t bit = 1u << code;
             if (!(pending & bit)) continue;
 
             uint32_t cause = exception::INTERRUPT_BIT | code;
             PrivilegeLevel target = delegate_target(cause, true);
+            if ((pass == 0) != (target == PrivilegeLevel::MACHINE)) continue;
             if (!interrupt_globally_enabled(target)) continue;
 
             if (target == PrivilegeLevel::SUPERVISOR) {
@@ -787,6 +801,7 @@ private:
             result.trap_info = "Interrupt";
             result.instr_size = 0;
             return true;
+        }
         }
         return false;
     }

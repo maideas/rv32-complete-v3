@@ -173,8 +173,12 @@ public:
     static constexpr uint32_t MI_MASK = MI_SSI | MI_MSI | MI_STI | MI_MTI | MI_SEI | MI_MEI;
 
     uint32_t mip_writable_mask() const {
-        // MSIP is writable in every implementation; SSIP only when S-mode exists.
-        return s_mode_enabled ? (MI_MSI | MI_SSI) : MI_MSI;
+        // Per priv spec v1.12, mip.MSIP is always software-writable, and
+        // mip.SSIP/STIP/SEIP are software-writable by M-mode when S-mode
+        // exists (the CPU's interrupt input lines drive the same bits via
+        // the set() backdoor, which is the other spec-sanctioned option).
+        // MTIP/MEIP in mip are read-only (platform-driven).
+        return s_mode_enabled ? (MI_MSI | MI_SSI | MI_STI | MI_SEI) : MI_MSI;
     }
 
 private:
@@ -376,8 +380,10 @@ public:
 
         if (current_privilege == PrivilegeLevel::SUPERVISOR) return true;
 
-        // USER: scounteren bit must also be set if S-mode is implemented.
-        if (!s_mode_enabled) return false;
+        // USER: when S-mode is implemented, the scounteren bit must also
+        // be set; without S-mode, scounteren does not exist and mcounteren
+        // alone gates U-mode counter access.
+        if (!s_mode_enabled) return true;
         auto its = csrs.find(csr_addr::SCOUNTEREN);
         uint32_t scen = (its != csrs.end()) ? its->second : 0;
         return ((scen >> idx) & 1u) != 0u;
@@ -512,8 +518,10 @@ public:
                 if (!s_mode_enabled) break;
                 uint32_t deleg = get(csr_addr::MIDELEG);
                 uint32_t mip = get(csr_addr::MIP);
-                uint32_t wmask = mip_writable_mask();
-                csrs[csr_addr::MIP] = (mip & ~deleg) | (value & deleg & wmask);
+                // Only SSIP is writable through sip (STIP/SEIP are read-only
+                // in the S-mode view), and only when delegated to S.
+                uint32_t wmask = MI_SSI & deleg;
+                csrs[csr_addr::MIP] = (mip & ~wmask) | (value & wmask);
                 break;
             }
             case csr_addr::STVEC: {

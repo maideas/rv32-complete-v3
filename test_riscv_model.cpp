@@ -212,6 +212,25 @@ static void test_rv32i_decode() {
         PASS();
     }
     {
+        TEST("JALR requires funct3 = 000; other funct3 values are illegal");
+        // jalr x1, 0(x2) canonical encoding
+        CHECK(dec.decode(0x000100E7).type == rv32i::InstrType::JALR);
+        // Same encoding with funct3 = 1 / 7 is reserved, not JALR.
+        CHECK(dec.decode(0x000110E7).type == rv32i::InstrType::ILLEGAL);
+        CHECK(dec.decode(0x000170E7).type == rv32i::InstrType::ILLEGAL);
+        PASS();
+    }
+    {
+        TEST("JALR with funct3 != 0 traps as illegal through the CPU");
+        auto sys = make_sys();
+        sys.memory.write32(0, 0x000110E7);   // jalr x1, 0(x2) with funct3 = 1
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        CHECK_EQ(r.trap_value, 0x000110E7u);
+        PASS();
+    }
+    {
         TEST("MISC-MEM: only FENCE decodes here; other funct3 illegal");
         CHECK(dec.decode(0x0FF0000F).type == rv32i::InstrType::FENCE);
         CHECK(dec.decode(0x0000100F).type == rv32i::InstrType::ILLEGAL); // fence.i -> Zifencei
@@ -468,6 +487,49 @@ static void test_rv32a() {
         CHECK_EQ(sys.memory.read32(0x100), 99u);
         // second SC without a reservation fails
         sys.cpu.pc = 4;
+        sys.step();
+        CHECK_EQ(sys.cpu.regs.read(6), 1u);
+        PASS();
+    }
+    {
+        TEST("Trap entry (exception) clears the LR/SC reservation");
+        auto sys = make_sys();
+        sys.memory.write32(0x100, 7);
+        sys.cpu.regs.write(5, 0x100);
+        sys.cpu.regs.write(4, 99);
+        sys.memory.write32(0, 0x1002A1AF);               // lr.w x3, (x5)
+        sys.memory.write32(4, 0x00000073);               // ecall
+        sys.memory.write32(8, 0x1842A32F);               // sc.w x6, x4, (x5)
+        sys.step();
+        CHECK(sys.cpu.reservation.has_reservation());
+        auto r = sys.step();
+        CHECK(r.trap);
+        CHECK(!sys.cpu.reservation.has_reservation());   // spec: traps clear it
+        // SC after the trap must fail (rd = 1), even to the same address.
+        sys.cpu.pc = 8;
+        sys.step();
+        CHECK_EQ(sys.cpu.regs.read(6), 1u);
+        CHECK_EQ(sys.memory.read32(0x100), 7u);          // no store happened
+        PASS();
+    }
+    {
+        TEST("Trap entry (interrupt) clears the LR/SC reservation");
+        auto sys = make_sys();
+        sys.memory.write32(0x100, 7);
+        sys.cpu.regs.write(5, 0x100);
+        sys.cpu.regs.write(4, 99);
+        sys.memory.write32(0, 0x1002A1AF);               // lr.w x3, (x5)
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x200u);
+        sys.step();
+        CHECK(sys.cpu.reservation.has_reservation());
+        sys.cpu.csrs.write(zicsr::csr_addr::MSTATUS, zicsr::CSRFile::MSTATUS_MIE);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE, zicsr::CSRFile::MI_MTI);
+        sys.cpu.set_timer_interrupt(true);
+        auto r = sys.step();
+        CHECK(r.interrupt);
+        CHECK(!sys.cpu.reservation.has_reservation());
+        // SC in the trap handler must fail (rd = 1).
+        sys.memory.write32(0x200, 0x1842A32F);           // sc.w x6, x4, (x5)
         sys.step();
         CHECK_EQ(sys.cpu.regs.read(6), 1u);
         PASS();
@@ -1191,6 +1253,35 @@ static void test_traps_interrupts() {
         CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), 0u);
         PASS();
     }
+    {
+        TEST("mip STIP/SEIP are M-writable with S mode; sip writes only SSIP");
+        CPUConfig cfg;
+        cfg.enable_s_mode = true;
+        cfg.enable_u_mode = true;
+        auto sys = make_sys(4096, cfg);
+        // Priv spec: MSIP/SSIP/STIP/SEIP are software-writable in mip when
+        // S-mode exists; MTIP/MEIP stay read-only (platform-driven).
+        sys.cpu.csrs.write(zicsr::csr_addr::MIP, 0xFFFFFFFFu);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP),
+                 zicsr::CSRFile::MI_MSI | zicsr::CSRFile::MI_SSI |
+                 zicsr::CSRFile::MI_STI | zicsr::CSRFile::MI_SEI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIP, 0);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), 0u);
+        // Delegate all S interrupts; a sip write of SSI|STI|SEI must only
+        // set SSIP (STIP/SEIP are read-only in the S-mode view of mip).
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG,
+                           zicsr::CSRFile::MI_SSI | zicsr::CSRFile::MI_STI |
+                           zicsr::CSRFile::MI_SEI);
+        sys.cpu.csrs.write(zicsr::csr_addr::SIP,
+                           zicsr::CSRFile::MI_SSI | zicsr::CSRFile::MI_STI |
+                           zicsr::CSRFile::MI_SEI);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::MIP), zicsr::CSRFile::MI_SSI);
+        CHECK_EQ(sys.cpu.csrs.read(zicsr::csr_addr::SIP), zicsr::CSRFile::MI_SSI);
+        // The CPU input lines still drive the same mip bits via the backdoor.
+        sys.cpu.set_supervisor_timer_interrupt(true);
+        CHECK(sys.cpu.csrs.read(zicsr::csr_addr::MIP) & zicsr::CSRFile::MI_STI);
+        PASS();
+    }
 }
 
 // ============================================================================
@@ -1669,6 +1760,33 @@ static void test_supervisor_user_mode() {
     }
 
     {
+        TEST("U-mode counters without S mode are gated by mcounteren alone");
+        CPUConfig u_cfg;
+        u_cfg.enable_u_mode = true;   // no S mode: scounteren does not exist
+        uint32_t inst = zicsr::encode::csrr(3, zicsr::csr_addr::TIME);
+        // mcounteren.TM = 0 -> trap
+        {
+            auto sys = make_sys(4096, u_cfg);
+            enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+            sys.memory.write32(0x100u, inst);
+            sys.cpu.csrs.write(zicsr::csr_addr::MCOUNTEREN, 0);
+            auto r = sys.step();
+            CHECK(r.trap);
+            CHECK_EQ(r.trap_cause, exception::ILLEGAL_INSTRUCTION);
+        }
+        // mcounteren.TM = 1 -> success (no scounteren to consult)
+        {
+            auto sys = make_sys(4096, u_cfg);
+            enter_mode(sys, PrivilegeLevel::USER, 0x100u);
+            sys.memory.write32(0x100u, inst);
+            sys.cpu.csrs.write(zicsr::csr_addr::MCOUNTEREN, 2u);
+            auto r = sys.step();
+            CHECK(!r.trap);
+        }
+        PASS();
+    }
+
+    {
         TEST("Exceptions taken in M mode are never delegated to S");
         auto sys = make_sys(4096, su_cfg);
         sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
@@ -1774,6 +1892,29 @@ static void test_supervisor_user_mode() {
         PASS();
     }
 
+    {
+        TEST("M-target interrupts beat delegated S-target interrupts");
+        auto sys = make_sys(4096, su_cfg);
+        sys.cpu.csrs.write(zicsr::csr_addr::MTVEC, 0x800u);
+        sys.cpu.csrs.write(zicsr::csr_addr::STVEC, 0x900u);
+        // Delegate MEI to S mode; MSI stays M-targeted. Pend both in S mode.
+        sys.cpu.csrs.write(zicsr::csr_addr::MIDELEG, zicsr::CSRFile::MI_MEI);
+        sys.cpu.csrs.write(zicsr::csr_addr::MIE,
+                           zicsr::CSRFile::MI_MEI | zicsr::CSRFile::MI_MSI);
+        enter_mode(sys, PrivilegeLevel::SUPERVISOR, 0x100u);
+        uint32_t ms = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
+        sys.cpu.csrs.set(zicsr::csr_addr::MSTATUS,
+                         ms | zicsr::CSRFile::MSTATUS_SIE);
+        sys.cpu.set_external_interrupt(true);    // MEI -> delegated to S
+        sys.cpu.set_software_interrupt(true);    // MSI -> M target
+        auto r = sys.step();
+        CHECK(r.interrupt);
+        // Despite MEI's higher cause priority, the M-target interrupt wins.
+        CHECK_EQ(r.trap_cause, exception::M_SOFTWARE_INTERRUPT);
+        CHECK_EQ(sys.cpu.csrs.get_privilege(), PrivilegeLevel::MACHINE);
+        CHECK_EQ(sys.cpu.pc, 0x800u);
+        PASS();
+    }
     {
         TEST("M-mode interrupt is taken while executing in S mode (MIE=0)");
         auto sys = make_sys(4096, su_cfg);

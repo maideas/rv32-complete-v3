@@ -134,11 +134,11 @@ suite for randomized round-trip and execution stimulus:
 |---|---|
 | `test_riscv_model.cpp` | The test suite: regression tests for every fixed bug, full-CPU integration tests (dispatch, traps, interrupts, MRET/SRET, misalignment, access faults, interrupt prioritization/gating, `sstatus` subset, SATP/TVM, MRET legality), and opcode-generator round trips for all extensions. Minimal built-in harness (TEST/CHECK macros), no external framework. |
 | `Makefile` | Builds the test suite into `build/` and runs it (`make test`). |
-| `AGENTS.md` | Project conventions for AI coding agents (layout, build/test rules). |
-| `notes.md` | Design Q&A notes on RISC-V hardware implementation: extension priorities for cache-less systems, dual-issue of compressed instructions, and serial execution in debug mode. |
-| `riscv_csr_reference.md` | CSR reference: every implemented CSR, its purpose and read/write behavior, `mstatus` field semantics, and the exact CSR state changes on exceptions, interrupts, MRET/SRET and reset. |
-| `riscv_s_and_u_modes_implementation.md` | Session log: plan and implementation of the S/U-mode support. |
-| `riscv_s_u_mode_review_fixes_and_tests.md` | Session log: review, spec fixes and test expansion for the S/U-mode work. |
+| [AGENTS.md](AGENTS.md) | Project conventions for AI coding agents (layout, build/test rules). |
+| [notes.md](doc/notes.md) | Design Q&A notes on RISC-V hardware implementation: extension priorities for cache-less systems, dual-issue of compressed instructions, and serial execution in debug mode. |
+| [riscv_csr_reference.md](doc/riscv_csr_reference.md) | CSR reference: every implemented CSR, its purpose and read/write behavior, `mstatus` field semantics, and the exact CSR state changes on exceptions, interrupts, MRET/SRET and reset. |
+| [riscv_s_and_u_modes_implementation.md](doc/riscv_s_and_u_modes_implementation.md) | Session log: plan and implementation of the S/U-mode support. |
+| [riscv_s_u_mode_review_fixes_and_tests.md](doc/riscv_s_u_mode_review_fixes_and_tests.md) | Session log: review, spec fixes and test expansion for the S/U-mode work. |
 | `LICENSE` | MIT license. |
 | `.gitignore` | Keeps `build/` artifacts out of version control. |
 

@@ -23,8 +23,8 @@ This is a **C++ RISC‑V RV32 reference/ISS model** with a focus on correctness 
 | `riscv_cpu.hpp` | The top-level `CPU` class. It owns the integer register file, FP register file, CSRs, PC, the LR/SC reservation set, and one decoder/executor instance for every extension. It defines `CPUConfig` (which extensions are enabled, reset vector, mtvec, misalignment policy), and implements instruction fetch (16-bit-granular for compressed), dispatch, trap/interrupt handling, and `CPUExecResult`. |
 | `test_riscv_model.cpp` | The main test suite. It uses a small macro harness and covers unit tests for the common layer, integration tests for all extensions, CSR behavior, traps, interrupts, MRET, misalignment/access-fault handling, and round-trip tests using the opcode generators. |
 | `Makefile` | Builds `build/test_riscv` from `test_riscv_model.cpp` with `-std=c++17 -Wall -Wextra -Wpedantic -fsanitize=undefined`. Provides `make test` and `make clean`. |
-| `AGENTS.md` | Project-specific instructions for the coding agent (build/test commands, layout). |
-| `notes.md` | Hardware-design notes/Q&A (not source code). Discusses performance impact of C/M/Zba/Zbb/F/A, compressed dual-issue/fusion trade-offs, and debug-mode serial execution. |
+| [AGENTS.md](../AGENTS.md) | Project-specific instructions for the coding agent (build/test commands, layout). |
+| [notes.md](notes.md) | Hardware-design notes/Q&A (not source code). Discusses performance impact of C/M/Zba/Zbb/F/A, compressed dual-issue/fusion trade-offs, and debug-mode serial execution. |
 | `LICENSE` | License text. |
 
 ---
@@ -303,7 +303,7 @@ In `execute_32bit`, detect `result.sret == true` and call `do_sret(result)`.
 
 No decoding changes. They must receive the **data MMU wrapper** instead of the raw `Bus` so all loads/stores and atomics go through translation.
 
-For `rv32a.hpp`:
+For `riscv_rv32a.hpp`:
 
 - Translate the LR address before reserving; store the **physical** reservation address so that aliased virtual mappings invalidate SC correctly.
 - AMOs require read+write permission; generate the appropriate page‑fault cause if either is denied.

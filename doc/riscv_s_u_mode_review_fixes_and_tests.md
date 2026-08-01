@@ -22,7 +22,7 @@ Confirmed two spec deviations. Cleaning up the scratch file:
 
 ### Review of local changes
 
-The working tree adds **Supervisor and User mode support** (phases 1, 2, 3, 5 of the plan documented in `riscv_s_and_u_modes_implementation.md`, which is itself the untracked session export). Modified: `riscv_cpu.hpp`, `riscv_rv32i.hpp`, `riscv_zicsr.hpp`, `test_riscv_model.cpp`.
+The working tree adds **Supervisor and User mode support** (phases 1, 2, 3, 5 of the plan documented in [riscv_s_and_u_modes_implementation.md](riscv_s_and_u_modes_implementation.md), which is itself the untracked session export). Modified: `riscv_cpu.hpp`, `riscv_rv32i.hpp`, `riscv_zicsr.hpp`, `test_riscv_model.cpp`.
 
 **Build status:** `make test` → **88 tests, 0 failures**, clean under `-Wall -Wextra -Wpedantic -fsanitize=undefined`.
 

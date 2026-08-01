@@ -1,8 +1,8 @@
 /*******************************************************************************
- * RISC-V RV32FC Compressed Floating-Point Extension Model (Zfc)
+ * RISC-V RV32FC Compressed Floating-Point Extension Model (Zcf)
  * 
  * Decoder for 16-bit compressed floating-point instructions.
- * These are part of the "Zfc" extension (subset of C extension for F).
+ * These are part of the "Zcf" extension (subset of C extension for F).
  * 
  * Instructions covered:
  *   - C.FLW (Compressed Floating Load Word) - uses compressed registers

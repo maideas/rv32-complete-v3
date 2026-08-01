@@ -125,7 +125,7 @@ struct CSRPermissions {
 // ============================================================================
 
 /**
- * CSR file for an M-mode-only RV32 hart.
+ * CSR file for an RV32 hart with optional Supervisor and User modes.
  *
  * - Only the CSRs of the implemented configuration exist; accessing any
  *   other CSR address must raise an illegal-instruction exception (the
@@ -137,8 +137,9 @@ struct CSRPermissions {
  *   storage cell backs all three addresses.
  * - cycle/cycleh/instret/instreth are read-only shadows aliased onto
  *   mcycle/mcycleh/minstret/minstreth.
- * - S-mode CSRs, medeleg/mideleg, mcounteren and time/timeh are NOT
- *   implemented (no S/U mode, no time CSR) and therefore trap.
+ * - S-mode CSRs, medeleg/mideleg and mcounteren/scounteren exist when the
+ *   corresponding modes are enabled; time/timeh are read-only aliases of
+ *   mcycle/mcycleh.
  */
 class CSRFile {
 public:

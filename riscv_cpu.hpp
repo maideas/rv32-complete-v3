@@ -651,7 +651,7 @@ private:
 
     // Choose target privilege for an exception/interrupt based on the
     // delegation registers.  U-mode delegation (sedeleg/sideleg) is not
-    // implemented in this phase.
+    // implemented.
     PrivilegeLevel delegate_target(uint32_t cause, bool is_interrupt) const {
         if (!config.enable_s_mode) return PrivilegeLevel::MACHINE;
         // Traps taken while in M-mode are never delegated to a less

@@ -98,6 +98,7 @@ public:
 private:
     RNG rng;
     bool generate_standard_only = true;
+    bool type_enabled_ = true;   // uniform API: single-instruction mask
     
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
@@ -109,7 +110,14 @@ public:
     void set_standard_only(bool standard) {
         generate_standard_only = standard;
     }
-    
+
+    // Enable-mask configuration, uniform with the other generators
+    // (only one instruction type exists here; an empty mask is legalized
+    // back to enabled).
+    void set_enabled_mask(uint64_t mask) { type_enabled_ = (mask != 0); }
+    uint64_t get_enabled_mask() const { return type_enabled_ ? 1ull : 0ull; }
+    void enable(InstrType, bool on = true) { type_enabled_ = on; }
+
     uint32_t generate(InstrType type) {
         (void)type;  // Only one type
         if (generate_standard_only) {

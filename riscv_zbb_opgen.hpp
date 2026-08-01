@@ -157,6 +157,25 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t LOGIC_NEG = type_bit(InstrType::ANDN) | type_bit(InstrType::ORN) |
+                                   type_bit(InstrType::XNOR);
+    constexpr uint64_t COUNT_OPS = type_bit(InstrType::CLZ) | type_bit(InstrType::CTZ) |
+                                   type_bit(InstrType::CPOP);
+    constexpr uint64_t MINMAX    = type_bit(InstrType::MIN) | type_bit(InstrType::MINU) |
+                                   type_bit(InstrType::MAX) | type_bit(InstrType::MAXU);
+    constexpr uint64_t EXTEND    = type_bit(InstrType::SEXT_B) | type_bit(InstrType::SEXT_H) |
+                                   type_bit(InstrType::ZEXT_H);
+    constexpr uint64_t ROTATE    = type_bit(InstrType::ROL) | type_bit(InstrType::ROR) |
+                                   type_bit(InstrType::RORI);
+    constexpr uint64_t BYTE_OPS  = type_bit(InstrType::ORC_B) | type_bit(InstrType::REV8);
+    constexpr uint64_t ALL       = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -167,6 +186,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_andn, gen_orn, gen_xnor,
@@ -183,14 +203,32 @@ public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
+
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
+    // Generate a random Zbb instruction, uniformly over the ENABLED types
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     // Category generators

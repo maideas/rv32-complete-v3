@@ -144,6 +144,18 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t MULTIPLY = type_bit(InstrType::MUL) | type_bit(InstrType::MULH) |
+                                  type_bit(InstrType::MULHSU) | type_bit(InstrType::MULHU);
+    constexpr uint64_t DIVIDE   = type_bit(InstrType::DIV) | type_bit(InstrType::DIVU) |
+                                  type_bit(InstrType::REM) | type_bit(InstrType::REMU);
+    constexpr uint64_t ALL      = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -154,6 +166,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_mul, gen_mulh, gen_mulhsu, gen_mulhu,
@@ -161,21 +174,47 @@ private:
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
+
+    template<size_t N>
+    InstrType pick_enabled(const InstrType (&list)[N]) {
+        for (int tries = 0; tries < 8; tries++) {
+            InstrType t = list[rng.range(0, N - 1)];
+            if (is_enabled(t)) return t;
+        }
+        for (InstrType t : list) if (is_enabled(t)) return t;
+        return InstrType::COUNT;
+    }
     
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
-    // Generate a specific instruction type
+
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
-    // Generate a completely random M instruction
+    // Generate a random M instruction, uniformly over the ENABLED types
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     // Generate random multiply instruction
@@ -183,7 +222,8 @@ public:
         static const InstrType mul_types[] = {
             InstrType::MUL, InstrType::MULH, InstrType::MULHSU, InstrType::MULHU
         };
-        return generate(mul_types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(mul_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random divide instruction
@@ -191,7 +231,8 @@ public:
         static const InstrType div_types[] = {
             InstrType::DIV, InstrType::DIVU, InstrType::REM, InstrType::REMU
         };
-        return generate(div_types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(div_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate N random instructions

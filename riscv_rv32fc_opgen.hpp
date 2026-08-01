@@ -147,6 +147,16 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t LOADS  = type_bit(InstrType::C_FLW) | type_bit(InstrType::C_FLWSP);
+    constexpr uint64_t STORES = type_bit(InstrType::C_FSW) | type_bit(InstrType::C_FSWSP);
+    constexpr uint64_t ALL    = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -157,41 +167,69 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_c_flw, gen_c_fsw, gen_c_flwsp, gen_c_fswsp
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
+
+    // chance()-based pick between two types honoring the mask
+    uint16_t pick2(GeneratorFunc a, InstrType ta, GeneratorFunc b, InstrType tb) {
+        bool ea = is_enabled(ta), eb = is_enabled(tb);
+        if (ea && eb) return rng.chance(0.5) ? a(rng) : b(rng);
+        if (ea) return a(rng);
+        if (eb) return b(rng);
+        return generate_random();
+    }
     
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
+
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint16_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
+    // Generate a random Zcf instruction, uniformly over the ENABLED types
     uint16_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     uint16_t generate_load() {
-        return rng.chance(0.5) ? gen_c_flw(rng) : gen_c_flwsp(rng);
+        return pick2(gen_c_flw, InstrType::C_FLW, gen_c_flwsp, InstrType::C_FLWSP);
     }
     
     uint16_t generate_store() {
-        return rng.chance(0.5) ? gen_c_fsw(rng) : gen_c_fswsp(rng);
+        return pick2(gen_c_fsw, InstrType::C_FSW, gen_c_fswsp, InstrType::C_FSWSP);
     }
     
     uint16_t generate_compressed_reg() {
-        return rng.chance(0.5) ? gen_c_flw(rng) : gen_c_fsw(rng);
+        return pick2(gen_c_flw, InstrType::C_FLW, gen_c_fsw, InstrType::C_FSW);
     }
     
     uint16_t generate_sp_relative() {
-        return rng.chance(0.5) ? gen_c_flwsp(rng) : gen_c_fswsp(rng);
+        return pick2(gen_c_flwsp, InstrType::C_FLWSP, gen_c_fswsp, InstrType::C_FSWSP);
     }
     
     std::vector<uint16_t> generate_sequence(size_t n) {

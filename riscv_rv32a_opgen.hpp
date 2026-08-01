@@ -212,6 +212,20 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t LR_SC      = type_bit(InstrType::LR_W) | type_bit(InstrType::SC_W);
+    constexpr uint64_t AMO_LOGICAL = type_bit(InstrType::AMOSWAP_W) | type_bit(InstrType::AMOXOR_W) |
+                                     type_bit(InstrType::AMOAND_W) | type_bit(InstrType::AMOOR_W);
+    constexpr uint64_t AMO_ARITH  = type_bit(InstrType::AMOADD_W) |
+                                    type_bit(InstrType::AMOMIN_W) | type_bit(InstrType::AMOMAX_W) |
+                                    type_bit(InstrType::AMOMINU_W) | type_bit(InstrType::AMOMAXU_W);
+    constexpr uint64_t ALL        = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -222,6 +236,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_lr_w, gen_sc_w,
@@ -230,21 +245,47 @@ private:
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
+
+    template<size_t N>
+    InstrType pick_enabled(const InstrType (&list)[N]) {
+        for (int tries = 0; tries < 8; tries++) {
+            InstrType t = list[rng.range(0, N - 1)];
+            if (is_enabled(t)) return t;
+        }
+        for (InstrType t : list) if (is_enabled(t)) return t;
+        return InstrType::COUNT;
+    }
     
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
-    // Generate a specific instruction type
+
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
-    // Generate a completely random A instruction
+    // Generate a random A instruction, uniformly over the ENABLED types
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     // Generate LR/SC pair (useful for testing)
@@ -264,7 +305,8 @@ public:
             InstrType::AMOMIN_W, InstrType::AMOMAX_W,
             InstrType::AMOMINU_W, InstrType::AMOMAXU_W
         };
-        return generate(amo_types[rng.range(0, 8)]);
+        InstrType t = pick_enabled(amo_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random arithmetic AMO (add, min, max variants)
@@ -274,7 +316,8 @@ public:
             InstrType::AMOMIN_W, InstrType::AMOMAX_W,
             InstrType::AMOMINU_W, InstrType::AMOMAXU_W
         };
-        return generate(arith_types[rng.range(0, 4)]);
+        InstrType t = pick_enabled(arith_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random logical AMO (and, or, xor, swap)
@@ -283,7 +326,8 @@ public:
             InstrType::AMOSWAP_W, InstrType::AMOXOR_W,
             InstrType::AMOAND_W, InstrType::AMOOR_W
         };
-        return generate(logic_types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(logic_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate with specific ordering
@@ -294,24 +338,28 @@ public:
         instr |= ((aq ? 1u : 0u) << 26) | ((rl ? 1u : 0u) << 25);
         return instr;
     }
-    
+
+private:
+    InstrType random_enabled_type() {
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;   // empty -> ALL
+        for (;;) {
+            auto t = static_cast<InstrType>(rng.range(0, NUM_INSTR_TYPES - 1));
+            if ((m >> static_cast<unsigned>(t)) & 1ull) return t;
+        }
+    }
+
+public:
     // Generate acquire-release pair
     uint32_t generate_acquire() {
-        return generate_with_ordering(
-            static_cast<InstrType>(rng.range(0, NUM_INSTR_TYPES - 1)), 
-            true, false);
+        return generate_with_ordering(random_enabled_type(), true, false);
     }
     
     uint32_t generate_release() {
-        return generate_with_ordering(
-            static_cast<InstrType>(rng.range(0, NUM_INSTR_TYPES - 1)), 
-            false, true);
+        return generate_with_ordering(random_enabled_type(), false, true);
     }
     
     uint32_t generate_seq_cst() {
-        return generate_with_ordering(
-            static_cast<InstrType>(rng.range(0, NUM_INSTR_TYPES - 1)), 
-            true, true);
+        return generate_with_ordering(random_enabled_type(), true, true);
     }
     
     // Generate N random instructions

@@ -250,6 +250,29 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t LOAD_STORE = type_bit(InstrType::FLW) | type_bit(InstrType::FSW);
+    constexpr uint64_t ARITH      = type_bit(InstrType::FADD_S) | type_bit(InstrType::FSUB_S) |
+                                    type_bit(InstrType::FMUL_S) | type_bit(InstrType::FDIV_S) |
+                                    type_bit(InstrType::FSQRT_S);
+    constexpr uint64_t MINMAX     = type_bit(InstrType::FMIN_S) | type_bit(InstrType::FMAX_S);
+    constexpr uint64_t FMA        = type_bit(InstrType::FMADD_S) | type_bit(InstrType::FMSUB_S) |
+                                    type_bit(InstrType::FNMADD_S) | type_bit(InstrType::FNMSUB_S);
+    constexpr uint64_t CVT        = type_bit(InstrType::FCVT_W_S) | type_bit(InstrType::FCVT_WU_S) |
+                                    type_bit(InstrType::FCVT_S_W) | type_bit(InstrType::FCVT_S_WU);
+    constexpr uint64_t MV         = type_bit(InstrType::FMV_X_W) | type_bit(InstrType::FMV_W_X);
+    constexpr uint64_t CMP        = type_bit(InstrType::FEQ_S) | type_bit(InstrType::FLT_S) |
+                                    type_bit(InstrType::FLE_S);
+    constexpr uint64_t SGNJ       = type_bit(InstrType::FSGNJ_S) | type_bit(InstrType::FSGNJN_S) |
+                                    type_bit(InstrType::FSGNJX_S);
+    constexpr uint64_t CLASSIFY   = type_bit(InstrType::FCLASS_S);
+    constexpr uint64_t ALL        = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -260,6 +283,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_flw, gen_fsw,
@@ -274,23 +298,55 @@ private:
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
+
+    template<size_t N>
+    InstrType pick_enabled(const InstrType (&list)[N]) {
+        for (int tries = 0; tries < 8; tries++) {
+            InstrType t = list[rng.range(0, N - 1)];
+            if (is_enabled(t)) return t;
+        }
+        for (InstrType t : list) if (is_enabled(t)) return t;
+        return InstrType::COUNT;
+    }
     
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
+
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
+    // Generate a random F instruction, uniformly over the ENABLED types
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     uint32_t generate_load_store() {
-        return rng.chance(0.5) ? gen_flw(rng) : gen_fsw(rng);
+        bool flw = is_enabled(InstrType::FLW), fsw = is_enabled(InstrType::FSW);
+        if (flw && fsw) return rng.chance(0.5) ? gen_flw(rng) : gen_fsw(rng);
+        if (flw) return gen_flw(rng);
+        if (fsw) return gen_fsw(rng);
+        return generate_random();
     }
     
     uint32_t generate_arithmetic() {
@@ -298,7 +354,8 @@ public:
             InstrType::FADD_S, InstrType::FSUB_S, InstrType::FMUL_S,
             InstrType::FDIV_S, InstrType::FSQRT_S
         };
-        return generate(types[rng.range(0, 4)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     uint32_t generate_fma() {
@@ -306,7 +363,8 @@ public:
             InstrType::FMADD_S, InstrType::FMSUB_S,
             InstrType::FNMADD_S, InstrType::FNMSUB_S
         };
-        return generate(types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     uint32_t generate_conversion() {
@@ -314,21 +372,24 @@ public:
             InstrType::FCVT_W_S, InstrType::FCVT_WU_S,
             InstrType::FCVT_S_W, InstrType::FCVT_S_WU
         };
-        return generate(types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     uint32_t generate_compare() {
         static const InstrType types[] = {
             InstrType::FEQ_S, InstrType::FLT_S, InstrType::FLE_S
         };
-        return generate(types[rng.range(0, 2)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     uint32_t generate_sign_inject() {
         static const InstrType types[] = {
             InstrType::FSGNJ_S, InstrType::FSGNJN_S, InstrType::FSGNJX_S
         };
-        return generate(types[rng.range(0, 2)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     uint32_t generate_no_memory() {
@@ -343,7 +404,8 @@ public:
             InstrType::FSGNJ_S, InstrType::FSGNJN_S, InstrType::FSGNJX_S,
             InstrType::FCLASS_S
         };
-        return generate(types[rng.range(0, 23)]);
+        InstrType t = pick_enabled(types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     std::vector<uint32_t> generate_sequence(size_t n) {

@@ -3,6 +3,14 @@
  * 
  * Generates valid, random RV32I instructions with all fields randomized
  * within legal bounds for each instruction type.
+ *
+ * Enable-mask configuration (same pattern in all opgen modules):
+ * set_enabled_mask()/enable() restrict generate_random() and the
+ * auxiliary selectors to a subset of instruction types — useful during
+ * bring-up (generate only what is already implemented) and debugging
+ * (focus on a few groups). Named group masks live in opgen::groups.
+ * generate(type) ignores the mask. The default mask (groups::ALL) is
+ * seed-stable; an empty mask is legalized back to ALL.
  ******************************************************************************/
 
 #ifndef RISCV_RV32I_OPGEN_HPP
@@ -394,6 +402,36 @@ enum class InstrType {
     COUNT  // Number of instruction types
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks for the enable configuration
+namespace groups {
+    constexpr uint64_t UPPER    = type_bit(InstrType::LUI) | type_bit(InstrType::AUIPC);
+    constexpr uint64_t JUMPS    = type_bit(InstrType::JAL) | type_bit(InstrType::JALR);
+    constexpr uint64_t BRANCHES = type_bit(InstrType::BEQ) | type_bit(InstrType::BNE) |
+                                  type_bit(InstrType::BLT) | type_bit(InstrType::BGE) |
+                                  type_bit(InstrType::BLTU) | type_bit(InstrType::BGEU);
+    constexpr uint64_t LOADS    = type_bit(InstrType::LB) | type_bit(InstrType::LH) |
+                                  type_bit(InstrType::LW) | type_bit(InstrType::LBU) |
+                                  type_bit(InstrType::LHU);
+    constexpr uint64_t STORES   = type_bit(InstrType::SB) | type_bit(InstrType::SH) |
+                                  type_bit(InstrType::SW);
+    constexpr uint64_t ALU_IMM  = type_bit(InstrType::ADDI) | type_bit(InstrType::SLTI) |
+                                  type_bit(InstrType::SLTIU) | type_bit(InstrType::XORI) |
+                                  type_bit(InstrType::ORI) | type_bit(InstrType::ANDI);
+    constexpr uint64_t SHIFTS   = type_bit(InstrType::SLLI) | type_bit(InstrType::SRLI) |
+                                  type_bit(InstrType::SRAI) | type_bit(InstrType::SLL) |
+                                  type_bit(InstrType::SRL) | type_bit(InstrType::SRA);
+    constexpr uint64_t ALU_REG  = type_bit(InstrType::ADD) | type_bit(InstrType::SUB) |
+                                  type_bit(InstrType::SLT) | type_bit(InstrType::SLTU) |
+                                  type_bit(InstrType::XOR) | type_bit(InstrType::OR) |
+                                  type_bit(InstrType::AND);
+    constexpr uint64_t FENCE_OP = type_bit(InstrType::FENCE);
+    constexpr uint64_t SYSTEM   = type_bit(InstrType::ECALL) | type_bit(InstrType::EBREAK);
+    constexpr uint64_t ALL      = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -404,6 +442,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-type enable mask
     
     // Generator function table
     static constexpr GeneratorFunc generators[] = {
@@ -433,21 +472,50 @@ private:
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
-    
+
+    // Pick an enabled type from a list; returns COUNT if none is enabled.
+    template<size_t N>
+    InstrType pick_enabled(const InstrType (&list)[N]) {
+        for (int tries = 0; tries < 8; tries++) {
+            InstrType t = list[rng.range(0, N - 1)];
+            if (is_enabled(t)) return t;
+        }
+        for (InstrType t : list) if (is_enabled(t)) return t;
+        return InstrType::COUNT;
+    }
+
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
-    // Generate a specific instruction type
+
+    // Enable-mask configuration: restrict generate_random() (and the
+    // auxiliary selectors) to a subset of instruction types/groups, e.g.
+    // during bring-up or debugging. The default (ALL) is seed-stable.
+    // An empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
-    // Generate a completely random instruction
+    // Generate a random instruction, uniformly over the ENABLED types
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     // Generate random instruction excluding control flow (branches/jumps)
@@ -464,8 +532,8 @@ public:
             InstrType::XOR, InstrType::SRL, InstrType::SRA, InstrType::OR, InstrType::AND,
             InstrType::FENCE
         };
-        InstrType type = safe_types[rng.range(0, sizeof(safe_types)/sizeof(safe_types[0]) - 1)];
-        return generate(type);
+        InstrType t = pick_enabled(safe_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random ALU instruction (R-type or I-type ALU)
@@ -477,8 +545,8 @@ public:
             InstrType::ADD, InstrType::SUB, InstrType::SLL, InstrType::SLT, InstrType::SLTU,
             InstrType::XOR, InstrType::SRL, InstrType::SRA, InstrType::OR, InstrType::AND
         };
-        InstrType type = alu_types[rng.range(0, sizeof(alu_types)/sizeof(alu_types[0]) - 1)];
-        return generate(type);
+        InstrType t = pick_enabled(alu_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random memory instruction
@@ -487,8 +555,8 @@ public:
             InstrType::LB, InstrType::LH, InstrType::LW, InstrType::LBU, InstrType::LHU,
             InstrType::SB, InstrType::SH, InstrType::SW
         };
-        InstrType type = mem_types[rng.range(0, sizeof(mem_types)/sizeof(mem_types[0]) - 1)];
-        return generate(type);
+        InstrType t = pick_enabled(mem_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random branch instruction
@@ -497,13 +565,19 @@ public:
             InstrType::BEQ, InstrType::BNE, InstrType::BLT,
             InstrType::BGE, InstrType::BLTU, InstrType::BGEU
         };
-        InstrType type = branch_types[rng.range(0, sizeof(branch_types)/sizeof(branch_types[0]) - 1)];
-        return generate(type);
+        InstrType t = pick_enabled(branch_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random jump instruction
     uint32_t generate_jump() {
-        return rng.chance(0.5) ? generate(InstrType::JAL) : generate(InstrType::JALR);
+        bool jal_enabled = is_enabled(InstrType::JAL);
+        bool jalr_enabled = is_enabled(InstrType::JALR);
+        if (jal_enabled && jalr_enabled)
+            return rng.chance(0.5) ? generate(InstrType::JAL) : generate(InstrType::JALR);
+        if (jal_enabled)  return generate(InstrType::JAL);
+        if (jalr_enabled) return generate(InstrType::JALR);
+        return generate_random();
     }
     
     // Generate N random instructions

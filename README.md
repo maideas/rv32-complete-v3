@@ -124,7 +124,15 @@ the directory to your include path and `#include "riscv_cpu.hpp"`.
 
 Each `riscv_<ext>_opgen.hpp` generates random *valid* opcodes for its
 extension (all fields randomized within legal bounds), used by the test
-suite for randomized round-trip and execution stimulus:
+suite for randomized round-trip and execution stimulus. Every generator
+supports a **per-instruction-type enable mask** (`set_enabled_mask()`,
+`enable()`, with named `groups::` constants like `groups::LOADS` or
+`groups::FMA`) so stimulus can be restricted during bring-up (generate
+only what the implementation already supports) or debugging (focus on a
+few instruction groups). The default (all-enabled) is seed-stable, an
+empty mask is legalized back to all-enabled, and auxiliary selectors
+(`generate_alu()`, `generate_memory()`, ...) honor the mask with
+fallback to the enabled set:
 `riscv_rv32i_opgen.hpp`, `riscv_rv32m_opgen.hpp`, `riscv_rv32a_opgen.hpp`,
 `riscv_rv32c_opgen.hpp`, `riscv_rv32f_opgen.hpp`, `riscv_rv32fc_opgen.hpp`,
 `riscv_zicsr_opgen.hpp`, `riscv_zifencei_opgen.hpp`, `riscv_zba_opgen.hpp`,

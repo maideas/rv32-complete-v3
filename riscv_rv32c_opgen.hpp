@@ -584,6 +584,24 @@ enum class InstrType {
     COUNT
 };
 
+// Bits for the enable mask: types occupy bits 0-26, HINT families 27-35
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+constexpr uint64_t hint_bit(HintType t) { return 1ull << (27 + static_cast<unsigned>(t)); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t C_MEM   = type_bit(InstrType::C_LW) | type_bit(InstrType::C_SW) |
+                                 type_bit(InstrType::C_LWSP) | type_bit(InstrType::C_SWSP);
+    constexpr uint64_t C_FLOW  = type_bit(InstrType::C_JAL) | type_bit(InstrType::C_J) |
+                                 type_bit(InstrType::C_BEQZ) | type_bit(InstrType::C_BNEZ) |
+                                 type_bit(InstrType::C_JR) | type_bit(InstrType::C_JALR);
+    constexpr uint64_t C_SYSTEM = type_bit(InstrType::C_EBREAK);
+    constexpr uint64_t C_TYPES = (1ull << 27) - 1;
+    constexpr uint64_t C_ALU   = C_TYPES ^ (C_MEM | C_FLOW | C_SYSTEM);
+    constexpr uint64_t HINTS   = 0x1FFull << 27;
+    constexpr uint64_t ALL     = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -594,6 +612,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // types: bits 0-26, hints: bits 27-35
     
     static constexpr GeneratorFunc generators[] = {
         // Quadrant 0
@@ -619,26 +638,66 @@ private:
     };
     static constexpr size_t NUM_HINT_TYPES = static_cast<size_t>(HintType::COUNT);
 
+    template<size_t N>
+    InstrType pick_enabled(const InstrType (&list)[N]) {
+        for (int tries = 0; tries < 8; tries++) {
+            InstrType t = list[rng.range(0, N - 1)];
+            if (is_enabled(t)) return t;
+        }
+        for (InstrType t : list) if (is_enabled(t)) return t;
+        return InstrType::COUNT;
+    }
+
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
     void seed(uint32_t s) { rng.seed(s); }
-    
-    // Generate a specific instruction type
+
+    // Enable-mask configuration (see rv32i opgen); bits 0-26 select the
+    // canonical types, bits 27-35 the HINT families (hint_bit()). The
+    // default (ALL) is seed-stable; an empty mask is legalized to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    void enable_hint(HintType t, bool on = true) {
+        if (on) enabled_ |= hint_bit(t); else enabled_ &= ~hint_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+    bool is_hint_enabled(HintType t) const { return (enabled_ & hint_bit(t)) != 0; }
+
+    // Generate a specific instruction type (ignores the enable mask)
     uint16_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
-    // Generate a completely random C instruction
+    // Generate a random C instruction, uniformly over the ENABLED types
     uint16_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = (enabled_ & groups::C_TYPES);
+        if (m == 0) m = groups::C_TYPES;   // no canonical type -> legalize
+        if (m == groups::C_TYPES) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
 
-    // Generate a random HINT encoding (executes as NOP; valid, not
-    // illegal). Useful for decoder-robustness stimulus.
+    // Generate a random HINT encoding from the ENABLED hint families
+    // (executes as NOP; valid, not illegal). If no hint family is
+    // enabled, falls back to generate_random().
     uint16_t generate_hint() {
-        return hint_generators[rng.range(0, NUM_HINT_TYPES - 1)](rng);
+        uint64_t h = (enabled_ ? enabled_ : groups::ALL) & groups::HINTS;
+        if (h == groups::HINTS)
+            return hint_generators[rng.range(0, NUM_HINT_TYPES - 1)](rng);
+        if (h == 0) return generate_random();
+        for (;;) {
+            size_t idx = rng.range(0, NUM_HINT_TYPES - 1);
+            if ((h >> (27 + idx)) & 1ull) return hint_generators[idx](rng);
+        }
     }
 
     uint16_t generate_hint(HintType type) {
@@ -659,7 +718,8 @@ public:
             InstrType::C_SUB, InstrType::C_XOR, InstrType::C_OR, InstrType::C_AND,
             InstrType::C_SLLI, InstrType::C_MV, InstrType::C_ADD
         };
-        return generate(alu_types[rng.range(0, sizeof(alu_types)/sizeof(alu_types[0]) - 1)]);
+        InstrType t = pick_enabled(alu_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random memory instruction
@@ -667,7 +727,8 @@ public:
         static const InstrType mem_types[] = {
             InstrType::C_LW, InstrType::C_SW, InstrType::C_LWSP, InstrType::C_SWSP
         };
-        return generate(mem_types[rng.range(0, 3)]);
+        InstrType t = pick_enabled(mem_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate random branch/jump instruction
@@ -676,7 +737,8 @@ public:
             InstrType::C_JAL, InstrType::C_J, InstrType::C_BEQZ, InstrType::C_BNEZ,
             InstrType::C_JR, InstrType::C_JALR
         };
-        return generate(cf_types[rng.range(0, 5)]);
+        InstrType t = pick_enabled(cf_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate non-control-flow instruction
@@ -689,7 +751,8 @@ public:
             InstrType::C_SUB, InstrType::C_XOR, InstrType::C_OR, InstrType::C_AND,
             InstrType::C_SLLI, InstrType::C_LWSP, InstrType::C_MV, InstrType::C_ADD, InstrType::C_SWSP
         };
-        return generate(safe_types[rng.range(0, sizeof(safe_types)/sizeof(safe_types[0]) - 1)]);
+        InstrType t = pick_enabled(safe_types);
+        return (t == InstrType::COUNT) ? generate_random() : generate(t);
     }
     
     // Generate N random instructions

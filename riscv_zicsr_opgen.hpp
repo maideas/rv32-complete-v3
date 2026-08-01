@@ -232,6 +232,18 @@ enum class InstrType {
     COUNT
 };
 
+// Bit for a type in the enable mask
+constexpr uint64_t type_bit(InstrType t) { return 1ull << static_cast<unsigned>(t); }
+
+// Named instruction-group masks
+namespace groups {
+    constexpr uint64_t REG_FORMS = type_bit(InstrType::CSRRW) | type_bit(InstrType::CSRRS) |
+                                   type_bit(InstrType::CSRRC);
+    constexpr uint64_t IMM_FORMS = type_bit(InstrType::CSRRWI) | type_bit(InstrType::CSRRSI) |
+                                   type_bit(InstrType::CSRRCI);
+    constexpr uint64_t ALL       = ~0ull;
+}
+
 // ============================================================================
 // Opcode Generator Class
 // ============================================================================
@@ -242,6 +254,7 @@ public:
     
 private:
     RNG rng;
+    uint64_t enabled_ = groups::ALL;   // per-instruction-form enable mask
     
     static constexpr GeneratorFunc generators[] = {
         gen_csrrw,
@@ -264,13 +277,31 @@ public:
     void set_s_mode(bool enabled) { rng.set_s_mode(enabled); }
     void set_u_mode(bool enabled) { rng.set_u_mode(enabled); }
 
+    // Enable-mask configuration (see rv32i opgen); default ALL is
+    // seed-stable, an empty mask is legalized back to ALL.
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(InstrType t, bool on = true) {
+        if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
+    }
+    bool is_enabled(InstrType t) const { return (enabled_ & type_bit(t)) != 0; }
+
+    // Generate a specific instruction form (ignores the enable mask)
     uint32_t generate(InstrType type) {
         return generators[static_cast<size_t>(type)](rng);
     }
     
+    // Generate a random CSR instruction, uniformly over the ENABLED forms
     uint32_t generate_random() {
-        size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
-        return generators[idx](rng);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        if (m == groups::ALL) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            return generators[idx](rng);
+        }
+        for (;;) {
+            size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
+            if ((m >> idx) & 1ull) return generators[idx](rng);
+        }
     }
     
     std::vector<uint32_t> generate_sequence(size_t n) {

@@ -464,6 +464,30 @@ struct ClassInfo {
     bool compressed;   // true: 16-bit encoding (mtval = zero-extended parcel)
 };
 
+// Class indices (stable: they match the table order below), used for
+// the enable-mask configuration and group constants.
+namespace class_idx {
+    constexpr size_t ALL_ZEROS = 0, ALL_ONES = 1, RESERVED_MAJOR = 2;
+    constexpr size_t LOAD = 3, STORE = 4, BRANCH = 5, JALR = 6, SLLI = 7,
+                     SRLI = 8, OP = 9, MISC_MEM = 10, SYSTEM_F3_0 = 11,
+                     SYSTEM_F3_4 = 12, CSR_ADDR = 13;
+    constexpr size_t FP_FIRST = 14, FP_LAST = 25;
+    constexpr size_t AMO_F3 = 26, AMO_F5 = 27, LR = 28;
+    constexpr size_t C_FIRST = 29, C_LAST = 37;
+}
+
+// Named class-group masks
+namespace groups {
+    constexpr uint64_t bit(size_t i) { return 1ull << i; }
+    constexpr uint64_t CANONICAL  = bit(0) | bit(1) | bit(2);
+    constexpr uint64_t BASE       = 0x3FFull << 3;    // classes 3-12
+    constexpr uint64_t CSR        = bit(13);
+    constexpr uint64_t FP         = 0xFFFull << 14;   // classes 14-25
+    constexpr uint64_t AMO        = 0x7ull << 26;     // classes 26-28
+    constexpr uint64_t COMPRESSED = 0x1FFull << 29;   // classes 29-37
+    constexpr uint64_t ALL        = ~0ull;
+}
+
 inline const ClassInfo* classes(size_t& count) {
     static const ClassInfo table[] = {
         {"all-zeros",                 gen_all_zeros,              true},
@@ -508,6 +532,48 @@ inline const ClassInfo* classes(size_t& count) {
     count = sizeof(table) / sizeof(table[0]);
     return table;
 }
+
+// ============================================================================
+// Masked random class generator
+//
+// Same enable-mask configuration as the valid opcode generators (see
+// rv32i opgen): restrict the generated classes during bring-up/debugging.
+// The default (ALL) is seed-stable per class draw; an empty mask is
+// legalized back to ALL.
+// ============================================================================
+
+class ClassGenerator {
+    RNG rng_;
+    uint64_t enabled_ = groups::ALL;
+
+public:
+    explicit ClassGenerator(uint32_t seed = std::random_device{}()) : rng_(seed) {}
+
+    void seed(uint32_t s) { rng_.seed(s); }
+
+    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
+    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable(size_t class_index, bool on = true) {
+        if (on) enabled_ |= groups::bit(class_index);
+        else    enabled_ &= ~groups::bit(class_index);
+    }
+
+    // Draw a random enabled class, generate one encoding from it, and
+    // return the class info through `out` (for diagnostics / mtval
+    // handling).
+    uint32_t generate_random(const ClassInfo*& out) {
+        size_t n;
+        const ClassInfo* table = classes(n);
+        uint64_t m = enabled_ ? enabled_ : groups::ALL;
+        for (;;) {
+            size_t idx = rng_.range(0, n - 1);
+            if ((m >> idx) & 1ull) {
+                out = &table[idx];
+                return table[idx].gen(rng_);
+            }
+        }
+    }
+};
 
 } // namespace illegal_opgen
 } // namespace riscv

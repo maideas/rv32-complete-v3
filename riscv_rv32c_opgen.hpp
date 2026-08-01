@@ -3,6 +3,12 @@
  * 
  * Generates valid, random RV32C (Compressed) 16-bit instructions with all 
  * fields randomized within legal bounds.
+ *
+ * The InstrType table produces canonical (non-HINT) encodings only.
+ * Compressed HINTs (rd = x0 forms of C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.SLLI
+ * and the shift-by-zero C.SLLI64/C.SRLI64/C.SRAI64 forms) are valid
+ * NOP-semantics encodings provided separately via generate_hint() and
+ * generate_mixed(), for decoder-robustness stimulus.
  * 
  * Note: This generates RV32C instructions only (not RV64C).
  * C.JAL is RV32-only, C.LD/C.SD/C.LDSP/C.SDSP are RV64-only (not included).
@@ -473,6 +479,71 @@ inline uint16_t gen_c_swsp(RNG& rng) {
 }
 
 // ============================================================================
+// HINT Generators
+//
+// HINTs are architecturally VALID encodings that execute as NOPs: the
+// rd = x0 forms of C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.SLLI and the
+// shift-by-zero forms (C.SLLI64/C.SRLI64/C.SRAI64). Hardware decoders
+// must not trap them. They are kept OUT of the InstrType table above so
+// that type-based generation stays canonical; use generate_hint() or
+// generate_mixed() to include them in stimulus.
+// ============================================================================
+
+// C.ADDI x0, nzimm (nzimm != 0)
+inline uint16_t gen_c_addi_x0_hint(RNG& rng) {
+    int32_t nzimm = rng.imm6_nz();
+    return 0b01 | ((nzimm & 0x1F) << 2) | (((nzimm >> 5) & 0x1) << 12);
+}
+
+// C.LI x0, imm (any immediate)
+inline uint16_t gen_c_li_x0_hint(RNG& rng) {
+    int32_t imm = rng.imm6();
+    return (0b010 << 13) | 0b01 | ((imm & 0x1F) << 2) | (((imm >> 5) & 0x1) << 12);
+}
+
+// C.LUI x0, nzimm (nzimm != 0)
+inline uint16_t gen_c_lui_x0_hint(RNG& rng) {
+    int32_t nzimm = rng.imm6_nz();
+    return (0b011 << 13) | 0b01 | ((nzimm & 0x1F) << 2) | (((nzimm >> 5) & 0x1) << 12);
+}
+
+// C.MV x0, rs2 (rs2 != x0)
+inline uint16_t gen_c_mv_x0_hint(RNG& rng) {
+    return (0b100 << 13) | 0b10 | (rng.reg_nz() << 2);
+}
+
+// C.ADD x0, rs2 (rs2 != x0)
+inline uint16_t gen_c_add_x0_hint(RNG& rng) {
+    return (0b100 << 13) | (1 << 12) | 0b10 | (rng.reg_nz() << 2);
+}
+
+// C.SLLI x0, shamt (any shamt 0-31)
+inline uint16_t gen_c_slli_x0_hint(RNG& rng) {
+    return 0b10 | ((rng.range(0, 31) & 0x1F) << 2);
+}
+
+// C.SLLI64: rd != x0, shamt = 0
+inline uint16_t gen_c_slli64_hint(RNG& rng) {
+    return 0b10 | (rng.reg_nz() << 7);
+}
+
+// C.SRLI64: shamt = 0 (rd' = x8-x15)
+inline uint16_t gen_c_srli64_hint(RNG& rng) {
+    return (0b100 << 13) | 0b01 | (rng.creg() << 7);
+}
+
+// C.SRAI64: shamt = 0 (rd' = x8-x15)
+inline uint16_t gen_c_srai64_hint(RNG& rng) {
+    return (0b100 << 13) | 0b01 | (0b01 << 10) | (rng.creg() << 7);
+}
+
+enum class HintType {
+    C_ADDI_X0, C_LI_X0, C_LUI_X0, C_MV_X0, C_ADD_X0,
+    C_SLLI_X0, C_SLLI64, C_SRLI64, C_SRAI64,
+    COUNT
+};
+
+// ============================================================================
 // Instruction Type Enum
 // ============================================================================
 
@@ -539,7 +610,15 @@ private:
     };
     
     static constexpr size_t NUM_INSTR_TYPES = static_cast<size_t>(InstrType::COUNT);
-    
+
+    using HintGeneratorFunc = uint16_t(*)(RNG&);
+    static constexpr HintGeneratorFunc hint_generators[] = {
+        gen_c_addi_x0_hint, gen_c_li_x0_hint, gen_c_lui_x0_hint,
+        gen_c_mv_x0_hint, gen_c_add_x0_hint, gen_c_slli_x0_hint,
+        gen_c_slli64_hint, gen_c_srli64_hint, gen_c_srai64_hint
+    };
+    static constexpr size_t NUM_HINT_TYPES = static_cast<size_t>(HintType::COUNT);
+
 public:
     explicit OpcodeGenerator(uint32_t seed = std::random_device{}()) : rng(seed) {}
     
@@ -554,6 +633,22 @@ public:
     uint16_t generate_random() {
         size_t idx = rng.range(0, NUM_INSTR_TYPES - 1);
         return generators[idx](rng);
+    }
+
+    // Generate a random HINT encoding (executes as NOP; valid, not
+    // illegal). Useful for decoder-robustness stimulus.
+    uint16_t generate_hint() {
+        return hint_generators[rng.range(0, NUM_HINT_TYPES - 1)](rng);
+    }
+
+    uint16_t generate_hint(HintType type) {
+        return hint_generators[static_cast<size_t>(type)](rng);
+    }
+
+    // Generate a mix of canonical instructions and HINTs
+    // (p_hint = probability of emitting a HINT).
+    uint16_t generate_mixed(double p_hint = 0.1) {
+        return rng.chance(p_hint) ? generate_hint() : generate_random();
     }
     
     // Generate random ALU instruction
@@ -633,8 +728,9 @@ public:
     }
 };
 
-// Static member definition
+// Static member definitions
 constexpr OpcodeGenerator::GeneratorFunc OpcodeGenerator::generators[];
+constexpr OpcodeGenerator::HintGeneratorFunc OpcodeGenerator::hint_generators[];
 
 // ============================================================================
 // Convenience Functions

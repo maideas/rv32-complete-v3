@@ -131,9 +131,12 @@ suite for randomized round-trip and execution stimulus:
 `riscv_zbb_opgen.hpp`, `riscv_zbs_opgen.hpp`, `riscv_zicond_opgen.hpp`.
 Notes: the Zicsr generator targets only existing CSRs — its CSR pools
 grow when `set_s_mode()`/`set_u_mode()` are enabled to match the CPU
-configuration (keeping stimulus trap-free), and the Zifencei generator
+configuration (keeping stimulus trap-free); the Zifencei generator
 emits the canonical FENCE.I unless `set_standard_only(false)` is used to
-randomize the spec-ignored rd/rs1/imm fields.
+randomize the spec-ignored rd/rs1/imm fields; and the RV32C generator
+emits only canonical (non-HINT) encodings from its type table — the
+valid NOP-semantics HINT space (rd = x0 forms, shift-by-zero forms) is
+available separately via `generate_hint()` / `generate_mixed()`.
 
 Complementing the valid-opcode generators, `riscv_illegal_opgen.hpp`
 generates *invalid* encodings derived from the specification's encoding

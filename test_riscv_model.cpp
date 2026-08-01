@@ -2217,6 +2217,27 @@ static int32_t opgen_addi16sp_imm(uint16_t w) {
     return (v & 0x200) ? v | (int32_t)0xFFFFFC00 : v;
 }
 
+// Is this 16-bit parcel a compressed HINT (or canonical C.NOP)?
+// Matches the rv32c opgen's canonical-vs-hint split.
+static bool is_c_hint(uint16_t w) {
+    uint8_t op = w & 0x3, f3 = (w >> 13) & 0x7;
+    uint8_t rd = (w >> 7) & 0x1F, rs2 = (w >> 2) & 0x1F;
+    uint32_t shamt = ((w >> 2) & 0x1F) | (((w >> 12) & 1) << 5);
+    if (op == 0b01) {
+        // c.addi/c.li/c.lui with rd = x0 (incl. c.nop)
+        if ((f3 == 0b000 || f3 == 0b010 || f3 == 0b011) && rd == 0) return true;
+        // c.srli64/c.srai64: shamt = 0 in the funct2 = 00/01 shift slots
+        if (f3 == 0b100 && shamt == 0 && ((w >> 10) & 0x3) <= 0b01) return true;
+    }
+    if (op == 0b10) {
+        // c.slli with rd = x0 or shamt = 0 (c.slli64)
+        if (f3 == 0b000 && (rd == 0 || shamt == 0)) return true;
+        // c.mv/c.add with rd = x0
+        if (f3 == 0b100 && rd == 0 && rs2 != 0) return true;
+    }
+    return false;
+}
+
 static void test_opgen_coverage() {
     printf("M. Opgen coverage\n");
     const int N = 200000;   // random-sample count per extension
@@ -2484,6 +2505,44 @@ static void test_opgen_coverage() {
                 return;
             }
         }
+        PASS();
+    }
+    {
+        TEST("RV32C opgen: all 9 HINT families decode valid and execute as NOPs");
+        rv32c::opgen::OpcodeGenerator g(118);
+        rv32c::Decoder dec;
+        for (int t = 0; t < (int)rv32c::opgen::HintType::COUNT; t++) {
+            for (int k = 0; k < 200; k++) {
+                uint16_t w = g.generate_hint((rv32c::opgen::HintType)t);
+                CHECK(dec.decode(w).type != rv32c::InstrType::ILLEGAL);
+                System sys(4096);
+                for (int i = 1; i < 32; i++) sys.cpu.regs.write(i, 0x55 + i);
+                sys.cpu.pc = 0x40;
+                auto r = sys.cpu.step(sys.memory, w);
+                if (r.trap) {
+                    printf("FAIL\n        HINT type %d encoding 0x%04X trapped\n", t, w);
+                    g_failures++;
+                    return;
+                }
+                // HINTs are NOPs: no register may change
+                for (int i = 1; i < 32; i++)
+                    CHECK_EQ(sys.cpu.regs.read(i), 0x55u + i);
+            }
+        }
+        PASS();
+    }
+    {
+        TEST("RV32C opgen: generate_mixed emits canonical and HINT encodings");
+        rv32c::opgen::OpcodeGenerator g(119);
+        rv32c::Decoder dec;
+        int hints = 0, canonical = 0;
+        for (int k = 0; k < 4000; k++) {
+            uint16_t w = g.generate_mixed(0.5);
+            CHECK(dec.decode(w).type != rv32c::InstrType::ILLEGAL);
+            if (is_c_hint(w)) hints++; else canonical++;
+        }
+        CHECK(hints > 1000);      // ~50% expected
+        CHECK(canonical > 1500);
         PASS();
     }
     {

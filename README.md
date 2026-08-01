@@ -167,6 +167,7 @@ deliberately excluded — they are valid NOPs.
 | [riscv_csr_reference.md](doc/riscv_csr_reference.md) | CSR reference: every implemented CSR, its purpose and read/write behavior, `mstatus` field semantics, and the exact CSR state changes on exceptions, interrupts, MRET/SRET and reset. |
 | [riscv_s_and_u_modes_implementation.md](doc/riscv_s_and_u_modes_implementation.md) | Session log: plan and implementation of the S/U-mode support. |
 | [riscv_s_u_mode_review_fixes_and_tests.md](doc/riscv_s_u_mode_review_fixes_and_tests.md) | Session log: review, spec fixes and test expansion for the S/U-mode work. |
+| [rv32_model_review_spec_fixes_and_opgen_tooling.md](doc/rv32_model_review_spec_fixes_and_opgen_tooling.md) | Session log: full-model review (seven spec fixes found and fixed), and the stimulus-tooling build-out — illegal-opcode generator, HINT generators, opgen coverage audits, and per-group enable masks. |
 | `LICENSE` | MIT license. |
 | `.gitignore` | Keeps `build/` artifacts out of version control. |
 

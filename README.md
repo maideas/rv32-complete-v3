@@ -145,6 +145,8 @@ randomize the spec-ignored rd/rs1/imm fields; and the RV32C generator
 emits only canonical (non-HINT) encodings from its type table — the
 valid NOP-semantics HINT space (rd = x0 forms, shift-by-zero forms) is
 available separately via `generate_hint()` / `generate_mixed()`.
+See [Opcode generators (test stimulus)](#opcode-generators-test-stimulus)
+for a full usage guide, including enable masks and groups.
 
 Complementing the valid-opcode generators, `riscv_illegal_opgen.hpp`
 generates *invalid* encodings derived from the specification's encoding
@@ -209,11 +211,8 @@ uint32_t mstatus = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
 ```
 
 - `step(Bus&, uint32_t opcode)` executes a caller-supplied opcode
-  (compressed or 32-bit, selected by the two low bits) instead of
-  fetching — useful for cosimulation, trace replay and direct stimulus.
-  Interrupts are still sampled first and the bus is still used for data
-  accesses, but no fetch occurs (so no instruction access faults and no
-  fetch side effects); the caller keeps `pc` coherent with the stream.
+  instead of fetching — see [Opcode-injection
+  stepping](#opcode-injection-stepping).
 - Handled traps redirect to `xTVEC` and execution **continues** in the
   handler; pass `stop_on_trap = true` to `run()` to stop at the first
   trap/interrupt instead.
@@ -221,6 +220,40 @@ uint32_t mstatus = sys.cpu.csrs.get(zicsr::csr_addr::MSTATUS);
   deliveries), and its default bound is effectively infinite — pass a
   finite limit when executing untrusted stimulus.
 - `mcycle` counts steps; `minstret` counts retired instructions only.
+
+### Opcode-injection stepping
+
+`step(Bus&, uint32_t opcode)` executes a caller-supplied opcode —
+compressed or 32-bit, selected by the two low bits as usual — instead
+of fetching from the bus. This is the primary interface for
+cosimulation, trace replay and directed stimulus:
+
+```cpp
+CPU cpu(cfg);
+SimpleMemory mem(64 * 1024);
+cpu.pc = 0x40;
+
+CPUExecResult r = cpu.step(mem, 0x003100B3);   // add x1, x2, x3
+// r.pc == 0x40, r.next_pc == 0x44, r.instr_size == 4, r.mnemonic == "add ..."
+
+r = cpu.step(mem, 0x9001);                     // 16-bit parcel -> compressed
+// r.instr_size == 2
+```
+
+The contract:
+
+- **No fetch happens**: no instruction access faults and no fetch side
+  effects; the caller keeps `pc` coherent with the injected stream
+  (the model still advances `pc` from `next_pc` as usual).
+- **Interrupts are still sampled first** (an interrupt delivery
+  executes *no* instruction: `r.interrupt`, `r.instr_size == 0`).
+- **The bus is still used for data loads/stores**, so misaligned and
+  access-fault traps occur exactly as for fetched execution, with
+  precise `mtval`.
+- Everything else — decode, execution, exceptions with precise
+  `xepc`/`xcause`/`xtval`, delegation, xRET, counters — is identical
+  to fetched execution; see `L. Opcode-injection stepping` in
+  `test_riscv_model.cpp` for a state-for-state equivalence test.
 
 ### Custom memory and peripherals: the `Bus` interface
 
@@ -277,6 +310,231 @@ between `step()` calls.
 ```cpp
 std::string s = sys.disasm(0x40);   // never throws; "<fetch fault>" if unreadable
 ```
+
+## Opcode generators (test stimulus)
+
+One generator per extension (`riscv_<ext>_opgen.hpp`, namespaces
+`riscv::<ext>::opgen`) produces random *valid* opcodes with every field
+drawn independently and uniformly within its legal range; a spec-table-
+derived *illegal* generator (`riscv_illegal_opgen.hpp`) produces
+encodings that must be rejected. All generators share the same API
+shape and the enable-mask configuration.
+
+### Basic usage
+
+```cpp
+#include "riscv_rv32i_opgen.hpp"
+using namespace riscv;
+
+rv32i::opgen::OpcodeGenerator gen(42);        // seed for reproducibility
+gen.seed(1234);                               // reseed any time
+
+uint32_t op  = gen.generate_random();         // random type, random fields
+uint32_t add = gen.generate(rv32i::opgen::InstrType::ADD);
+auto seq     = gen.generate_sequence(1000);   // vector of 1000 opcodes
+
+// Auxiliary selectors (type-class shortcuts)
+gen.generate_alu();              // any ALU instruction
+gen.generate_memory();           // any load/store
+gen.generate_branch();           // any conditional branch
+gen.generate_no_control_flow();  // no branches/jumps/ecall/ebreak
+gen.generate_linear_sequence(100);
+```
+
+Seeds make streams fully reproducible; the default configuration
+(all types enabled) is **seed-stable** — it produces exactly the same
+stream regardless of any mask-related API calls you don't make.
+
+### Generator-specific selectors
+
+| Generator | Extra API |
+|---|---|
+| RV32C | `generate_hint()` / `generate_hint(HintType)` — compressed HINTs (valid NOPs: `c.addi x0`, `c.lui x0`, shift-by-zero forms, ...); `generate_mixed(p_hint)` — blend HINTs into the canonical stream at a given rate |
+| RV32A | `generate_lr()` / `generate_sc()` / `generate_amo()` / `generate_amo_arithmetic()` / `generate_amo_logical()` / `generate_acquire()` / `generate_release()` / `generate_seq_cst()` / `generate_with_ordering(type, aq, rl)` |
+| RV32F | `generate_load_store()` / `generate_arithmetic()` / `generate_fma()` / `generate_conversion()` / `generate_compare()` / `generate_sign_inject()` / `generate_no_memory()` |
+| Zicsr | `set_s_mode(b)` / `set_u_mode(b)` — grow the CSR address pools (`medeleg`/`mideleg`, supervisor CSRs) to match the CPU configuration so stimulus stays trap-free |
+| Zifencei | `set_standard_only(false)` — also randomize the spec-ignored rd/rs1/imm fields of FENCE.I (default: canonical encoding only) |
+| RV32FC, M, Zba, Zbb, Zbs, Zicond | the common API only (type tables are small) |
+
+### Restricting stimulus: enable masks and groups
+
+Every generator carries a 64-bit **enable mask** with one bit per
+instruction type (for RV32C, bits 0–26 are the canonical types and
+bits 27–35 the HINT families). Use it during bring-up (generate only
+what the implementation already supports) or debugging (focus on a few
+groups):
+
+```cpp
+rv32i::opgen::OpcodeGenerator gen(42);
+
+gen.set_enabled_mask(rv32i::opgen::groups::LOADS |
+                     rv32i::opgen::groups::STORES);   // LSU bring-up
+gen.enable(rv32i::opgen::InstrType::JAL, true);       // plus one type
+gen.enable(rv32i::opgen::InstrType::LB, false);       // minus one type
+
+gen.generate_random();        // only enabled types, uniformly
+gen.generate(rv32i::opgen::InstrType::SUB);  // explicit: ignores the mask
+```
+
+Semantics:
+
+- `generate_random()` samples **uniformly over the enabled types**;
+  `generate(type)` always honors an explicit request.
+- Auxiliary selectors (`generate_alu()`, `generate_memory()`, ...)
+  honor the mask and fall back to the enabled set when their own type
+  list is fully masked out.
+- An **empty mask is legalized to all-enabled** — no empty streams.
+- Mask constants compose with `|`; `type_bit(type)` builds single-type
+  masks; `get_enabled_mask()` reads the current mask back.
+
+Named group constants per generator:
+
+| Generator | `groups::` constants |
+|---|---|
+| RV32I | `UPPER`, `JUMPS`, `BRANCHES`, `LOADS`, `STORES`, `ALU_IMM`, `SHIFTS`, `ALU_REG`, `FENCE_OP`, `SYSTEM`, `ALL` |
+| M | `MULTIPLY`, `DIVIDE`, `ALL` |
+| A | `LR_SC`, `AMO_LOGICAL`, `AMO_ARITH`, `ALL` |
+| C | `C_MEM`, `C_FLOW`, `C_ALU`, `C_SYSTEM`, `C_TYPES`, `HINTS`, `ALL` (plus `hint_bit(HintType)`) |
+| F | `LOAD_STORE`, `ARITH`, `MINMAX`, `FMA`, `CVT`, `MV`, `CMP`, `SGNJ`, `CLASSIFY`, `ALL` |
+| Zcf | `LOADS`, `STORES`, `ALL` |
+| Zicsr | `REG_FORMS`, `IMM_FORMS`, `ALL` |
+| Zba | `SHADD`, `ALL` |
+| Zbb | `LOGIC_NEG`, `COUNT_OPS`, `MINMAX`, `EXTEND`, `ROTATE`, `BYTE_OPS`, `ALL` |
+| Zbs | `SET`, `CLEAR`, `INVERT`, `EXTRACT`, `ALL` |
+| Zicond, Zifencei | `ALL` (per-type `enable()` still works) |
+
+### Illegal-opcode stimulus
+
+`riscv_illegal_opgen.hpp` (namespace `riscv::illegal_opgen`) emits
+encodings that are invalid per the specification's encoding tables —
+derived independently of the model's decoders, so a shared spec
+misreading cannot cancel out. Every generated encoding must trap with
+cause 2 (`illegal instruction`), `xtval` = instruction bits, and no
+architectural side effects. HINT encodings are deliberately *not*
+generated (they are valid NOPs).
+
+```cpp
+illegal_opgen::ClassGenerator gen(42);
+const illegal_opgen::ClassInfo* info = nullptr;
+
+gen.set_enabled_mask(illegal_opgen::groups::COMPRESSED);
+uint32_t op = gen.generate_random(info);
+// info->name (e.g. "C.LWSP rd=x0"), info->compressed (mtval = parcel)
+
+// Or iterate the full class table directly:
+size_t n;
+const illegal_opgen::ClassInfo* table = illegal_opgen::classes(n);
+```
+
+Group constants: `CANONICAL`, `BASE`, `CSR`, `FP`, `AMO`, `COMPRESSED`,
+`ALL`; stable per-class indices live in `illegal_opgen::class_idx`.
+
+## Lockstep cosimulation with an HDL implementation
+
+The model is designed for lockstep verification against an RTL core:
+header-only C++ (drop it into a Verilator/Verible C++ harness or a
+DPI-C shared library), opcode injection (no fetch coupling), precise
+trap reporting, and maskable stimulus that tracks the implementation's
+maturity.
+
+### Architecture
+
+```
+              +---------------------------+
+              | stimulus (opgen + masks)  |
+              +-------------+-------------+
+                            | same opcode stream, same memory image
+            +---------------v+    +-------v--------+
+            | reference model |    | DUT (RTL)     |
+            | step(bus, op)   |    | testbench     |
+            +-------+---------+    +-------+-------+
+                    | compare after every instruction
+        +-----------v------------+
+        | pc, x-regs, f-regs,    |
+        | memory writes, trap    |
+        | cause/xtval/xepc, priv |
+        +------------------------+
+```
+
+### Setup checklist
+
+1. **Match configurations.** Set `CPUConfig` to the RTL's parameter set:
+   extension enables, `allow_misaligned_data`, `reset_vector`,
+   `mtvec_reset`, S/U modes. Remember extension enables take effect at
+   `reset()`.
+2. **Share the memory image.** Load the same bytes into the model's
+   memory (`load_program`) and the RTL's memory. For data accesses,
+   either give both sides identical memories and compare writes, or
+   route the model's `Bus` to the *same* backing store as the DUT.
+3. **Drive identical stimulus.** Generate with the opgens,
+   masked to the instructions the RTL already implements:
+
+   ```cpp
+   rv32i::opgen::OpcodeGenerator stim(seed);
+   stim.set_enabled_mask(rv32i::opgen::groups::ALU_IMM |
+                         rv32i::opgen::groups::ALU_REG |
+                         rv32i::opgen::groups::SHIFTS);
+
+   CPU model(cfg);
+   for (;;) {
+       uint32_t op = stim.generate_random();
+       CPUExecResult r = model.step(bus, op);   // golden
+       drive_dut_with(op);                       // via your harness
+       compare(r, dut_state);
+   }
+   ```
+
+4. **Compare after every instruction.** The minimal golden set from
+   `CPUExecResult` plus model state:
+
+   | What | Model source | Notes |
+   |---|---|---|
+   | Instruction retired vs trapped | `r.trap` / `r.interrupt` | must match exactly |
+   | Trap cause / xtval / xepc | `r.trap_cause`, `r.trap_value`, `csrs.get(MEPC)` | precise on both sides |
+   | Next PC | `r.next_pc` | check RTL's pc after retirement |
+   | x-register file | `model.regs.read(i)` | compare all 31 each step (cheapest full check) |
+   | f-register file / fflags | `model.fregs.read_bits(i)`, `fcsr` | see FP caveat below |
+   | Memory writes | watch `Bus::write*` calls or compare images | AMOs are one logical read+write |
+   | Privilege / key CSRs | `csrs.get_privilege()`, `mstatus`, `mie`... | mind WARL implementation choices |
+
+### Recommended bring-up flow
+
+1. **Canonical groups, one at a time** — start with `ALU_IMM`/`ALU_REG`,
+   add `LOADS`/`STORES`, then control flow. A mismatch maps to a single
+   group.
+2. **Full valid space** — all groups enabled; add the other extensions'
+   generators.
+3. **HINT mix** — `generate_mixed(0.1)`: the RTL must treat every HINT
+   as a NOP (a classic RTL bug).
+4. **Illegal space** — `illegal_opgen::ClassGenerator`: the RTL must
+   trap every class precisely (cause 2, xtval, no side effects).
+5. **Config matrix** — disable extensions on both sides (RTL parameter
+   ↔ `CPUConfig` + masks); formerly valid encodings must now trap.
+6. **Interrupts and traps** — drive the same level-sensitive lines into
+   both (`set_timer_interrupt()` etc. ↔ RTL pins) and compare
+   delegation, vectoring and xRET behavior.
+
+### Caveats
+
+- **Interrupts**: inject them only after phase 6 — they make every
+  step's outcome timing-dependent. `r.interrupt` marks steps where the
+  model delivered an interrupt and no instruction retired.
+- **Counters**: `mcycle`/`minstret` semantics (steps vs retired) may
+  differ from your RTL's; either align the RTL or mask these CSRs out
+  of the comparison.
+- **WARL fields** (`misa`, `mtvec` mode, `mepc` mask, `mstatus.FS/SD`):
+  the model's legalizations are documented in
+  [riscv_csr_reference.md](doc/riscv_csr_reference.md) — match the RTL
+  to them or exclude these fields from comparison.
+- **Floating point**: arithmetic is bit-exact via the host FPU
+  (RNE/RTZ/RDN/RUP, fused FMA), except RMM which is approximated with
+  RNE (differs only on exact ties). If your RTL FPU is not yet
+  IEEE-exact, compare integer results and fflags selectively rather
+  than raw f-register bits.
+- **Delivery mechanisms**: with Verilator, link the headers directly
+  into the C++ harness. With event-driven simulators, wrap the model in
+  a DPI-C shared library, or stream `{opcode, expected state}` records
+  over a file/socket for batch comparison.
 
 ## Design highlights
 

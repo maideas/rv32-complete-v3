@@ -343,9 +343,12 @@ inline uint32_t gen_fence(RNG& rng) {
     // FENCE has predecessor/successor ordering bits in imm field
     // fm[3:0] | pred[3:0] | succ[3:0] in bits [31:20]
     // pred/succ: I=bit3, O=bit2, R=bit1, W=bit0
+    // fm: 0000 = normal FENCE, 1000 = FENCE.TSO — the two defined values
+    // (rd/rs1 stay 0: reserved fields that must be zero).
+    uint32_t fm = rng.chance(0.5) ? 0b0000 : 0b1000;
     uint32_t pred = rng.range(0, 15);
     uint32_t succ = rng.range(0, 15);
-    uint32_t imm = (pred << 4) | succ;
+    uint32_t imm = (fm << 8) | (pred << 4) | succ;
     return encode_i_type(imm, 0, 0b000, 0, opcode::MISC);
 }
 

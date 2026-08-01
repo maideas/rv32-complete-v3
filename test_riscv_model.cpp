@@ -14,6 +14,9 @@
  *   - Opcode-generator round trips for every extension
  *   - Opcode-injection stepping (step(bus, opcode): no fetch, data access
  *     via bus, traps/interrupts, equivalence with fetched execution)
+ *   - Opgen coverage: every extension's generator must produce every
+ *     instruction type with all operand fields spanning their full valid
+ *     ranges (type histograms, immediate extremes, CSR address pools)
  *
  * Build:
  *   g++ -std=c++17 -Wall -Wextra -Wpedantic -fsanitize=undefined \
@@ -38,6 +41,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <set>
 
 // ============================================================================
 // Minimal test harness
@@ -2164,6 +2169,323 @@ static void test_step_opcode_injection() {
 // main
 // ============================================================================
 
+// ============================================================================
+// M. Opgen coverage: instruction types and field ranges
+// ============================================================================
+
+// Immediate extraction helpers (independent of the decoders under test).
+static int32_t opgen_i_imm(uint32_t w) { return (int32_t)w >> 20; }
+static int32_t opgen_b_imm(uint32_t w) {
+    int32_t v = ((w>>31)&1)<<12 | ((w>>7)&1)<<11 | ((w>>25)&0x3F)<<5 | ((w>>8)&0xF)<<1;
+    return (v & 0x1000) ? v | (int32_t)0xFFFFE000 : v;
+}
+static int32_t opgen_j_imm(uint32_t w) {
+    int32_t v = ((w>>31)&1)<<20 | ((w>>12)&0xFF)<<12 | ((w>>20)&1)<<11 | ((w>>21)&0x3FF)<<1;
+    return (v & 0x100000) ? v | (int32_t)0xFFE00000 : v;
+}
+static int32_t opgen_cj_imm(uint16_t w) {
+    int32_t v = ((w>>2)&1)<<5 | ((w>>3)&7)<<1 | ((w>>6)&1)<<7 | ((w>>7)&1)<<6 |
+                ((w>>8)&1)<<10 | ((w>>9)&3)<<8 | ((w>>11)&1)<<4 | ((w>>12)&1)<<11;
+    return (v & 0x800) ? v | (int32_t)0xFFFFF000 : v;
+}
+static int32_t opgen_cb_imm(uint16_t w) {
+    int32_t v = ((w>>2)&1)<<5 | ((w>>3)&3)<<1 | ((w>>5)&3)<<6 | ((w>>10)&3)<<3 |
+                ((w>>12)&1)<<8;
+    return (v & 0x100) ? v | (int32_t)0xFFFFFE00 : v;
+}
+static int32_t opgen_addi16sp_imm(uint16_t w) {
+    int32_t v = ((w>>2)&1)<<5 | ((w>>3)&3)<<7 | ((w>>5)&1)<<6 | ((w>>6)&1)<<4 |
+                ((w>>12)&1)<<9;
+    return (v & 0x200) ? v | (int32_t)0xFFFFFC00 : v;
+}
+
+static void test_opgen_coverage() {
+    printf("M. Opgen coverage\n");
+    const int N = 200000;   // random-sample count per extension
+    const int T = 200000;   // targeted per-type sample count
+
+    {
+        TEST("RV32I opgen: all 40 types, all registers, no illegal encodings");
+        rv32i::opgen::OpcodeGenerator g(101);
+        rv32i::Decoder dec;
+        std::map<int,int> types;
+        std::set<int> regs;
+        for (int k = 0; k < N; k++) {
+            auto d = dec.decode(g.generate_random());
+            CHECK(d.type != rv32i::InstrType::ILLEGAL);
+            types[(int)d.type]++;
+            regs.insert(d.rd); regs.insert(d.rs1); regs.insert(d.rs2);
+        }
+        CHECK_EQ((int)types.size(), 40);
+        CHECK_EQ(regs.size(), 32u);
+        PASS();
+    }
+    {
+        TEST("RV32I opgen: immediate fields reach their full valid ranges");
+        rv32i::opgen::OpcodeGenerator g(102);
+        int32_t i_lo = 0, i_hi = 0, b_lo = 0, b_hi = 0, j_lo = 0, j_hi = 0;
+        for (int k = 0; k < T; k++) {
+            uint32_t w = g.generate(rv32i::opgen::InstrType::ADDI);
+            i_lo = std::min(i_lo, opgen_i_imm(w)); i_hi = std::max(i_hi, opgen_i_imm(w));
+        }
+        for (int k = 0; k < T; k++) {
+            uint32_t w = g.generate(rv32i::opgen::InstrType::BEQ);
+            b_lo = std::min(b_lo, opgen_b_imm(w)); b_hi = std::max(b_hi, opgen_b_imm(w));
+        }
+        for (int k = 0; k < T; k++) {
+            uint32_t w = g.generate(rv32i::opgen::InstrType::JAL);
+            j_lo = std::min(j_lo, opgen_j_imm(w)); j_hi = std::max(j_hi, opgen_j_imm(w));
+        }
+        CHECK_EQ(i_lo, -2048); CHECK_EQ(i_hi, 2047);
+        CHECK_EQ(b_lo, -4096); CHECK_EQ(b_hi, 4094);
+        // ~1M distinct J offsets: require near-extremes, not exact hits
+        CHECK(j_lo <= -1048000); CHECK(j_hi >= 1048000);
+        PASS();
+    }
+    {
+        TEST("RV32I opgen: FENCE generates both fm = 0000 and fm = 1000 (TSO)");
+        rv32i::opgen::OpcodeGenerator g(103);
+        bool fm0 = false, fm8 = false, other = false;
+        for (int k = 0; k < 2000; k++) {
+            uint32_t w = g.generate(rv32i::opgen::InstrType::FENCE);
+            uint32_t fm = w >> 28;
+            if (fm == 0) fm0 = true;
+            else if (fm == 8) fm8 = true;
+            else other = true;
+        }
+        CHECK(fm0 && fm8 && !other);
+        PASS();
+    }
+    {
+        TEST("RV32C opgen: all 27 types, no illegal encodings");
+        rv32c::opgen::OpcodeGenerator g(104);
+        rv32c::Decoder dec;
+        std::map<int,int> types;
+        for (int k = 0; k < N; k++) {
+            auto d = dec.decode(g.generate_random());
+            CHECK(d.type != rv32c::InstrType::ILLEGAL);
+            types[(int)d.type]++;
+        }
+        CHECK_EQ((int)types.size(), 27);
+        PASS();
+    }
+    {
+        TEST("RV32C opgen: jump/branch/ADDI16SP immediates reach full ranges");
+        rv32c::opgen::OpcodeGenerator g(105);
+        int32_t j_lo = 0, j_hi = 0, b_lo = 0, b_hi = 0, sp_lo = 0, sp_hi = 0;
+        for (int k = 0; k < T; k++) {
+            uint16_t w = g.generate(rv32c::opgen::InstrType::C_J);
+            j_lo = std::min(j_lo, opgen_cj_imm(w)); j_hi = std::max(j_hi, opgen_cj_imm(w));
+        }
+        for (int k = 0; k < T; k++) {
+            uint16_t w = g.generate(rv32c::opgen::InstrType::C_BEQZ);
+            b_lo = std::min(b_lo, opgen_cb_imm(w)); b_hi = std::max(b_hi, opgen_cb_imm(w));
+        }
+        for (int k = 0; k < T; k++) {
+            uint16_t w = g.generate(rv32c::opgen::InstrType::C_ADDI16SP);
+            sp_lo = std::min(sp_lo, opgen_addi16sp_imm(w));
+            sp_hi = std::max(sp_hi, opgen_addi16sp_imm(w));
+        }
+        CHECK_EQ(j_lo, -2048); CHECK_EQ(j_hi, 2046);
+        CHECK_EQ(b_lo, -256);  CHECK_EQ(b_hi, 254);
+        CHECK_EQ(sp_lo, -512); CHECK_EQ(sp_hi, 496);   // incl. the -512 extreme
+        PASS();
+    }
+    {
+        TEST("M/A opgens: all types; A covers all four aq/rl combinations");
+        rv32m::opgen::OpcodeGenerator gm(106);
+        rv32m::Decoder dm;
+        std::map<int,int> m_types;
+        for (int k = 0; k < N; k++) {
+            auto d = dm.decode(gm.generate_random());
+            CHECK(d.type != rv32m::InstrType::ILLEGAL);
+            m_types[(int)d.type]++;
+        }
+        CHECK_EQ((int)m_types.size(), 8);
+
+        rv32a::opgen::OpcodeGenerator ga(107);
+        rv32a::Decoder da;
+        std::map<int,int> a_types;
+        std::set<int> orderings;
+        for (int k = 0; k < N; k++) {
+            auto d = da.decode(ga.generate_random());
+            CHECK(d.type != rv32a::InstrType::ILLEGAL);
+            a_types[(int)d.type]++;
+            orderings.insert((d.aq ? 2 : 0) | (d.rl ? 1 : 0));
+        }
+        CHECK_EQ((int)a_types.size(), 11);
+        CHECK_EQ(orderings.size(), 4u);
+        PASS();
+    }
+    {
+        TEST("F/Zcf opgens: all types, every legal rm, C.FLWSP covers f0-f31");
+        rv32f::opgen::OpcodeGenerator gf(108);
+        rv32f::Decoder df;
+        std::map<int,int> f_types;
+        std::set<int> rms;
+        for (int k = 0; k < N; k++) {
+            auto d = df.decode(gf.generate_random());
+            CHECK(d.type != rv32f::InstrType::ILLEGAL);
+            f_types[(int)d.type]++;
+            if (rv32f::Decoder::uses_rm(d.type)) rms.insert(d.rm);
+        }
+        CHECK_EQ((int)f_types.size(), 26);
+        CHECK(rms == std::set<int>({0, 1, 2, 3, 4, 7}));   // no reserved 5/6
+
+        rv32fc::opgen::OpcodeGenerator gfc(109);
+        rv32fc::Decoder dfc;
+        std::map<int,int> fc_types;
+        std::set<int> flwsp_dests;
+        for (int k = 0; k < N; k++) {
+            auto d = dfc.decode(gfc.generate_random());
+            CHECK(d.type != rv32fc::InstrType::ILLEGAL);
+            fc_types[(int)d.type]++;
+            if (d.type == rv32fc::InstrType::C_FLWSP) flwsp_dests.insert(d.rd);
+        }
+        CHECK_EQ((int)fc_types.size(), 4);
+        CHECK_EQ(flwsp_dests.size(), 32u);   // f0 is a valid destination
+        PASS();
+    }
+    {
+        TEST("Zba/Zbb/Zbs/Zicond opgens: all types; immediate shamt 0 and 31");
+        zba::opgen::OpcodeGenerator gzba(110);
+        zba::Decoder dzba;
+        std::map<int,int> zba_types;
+        for (int k = 0; k < N; k++) {
+            auto d = dzba.decode(gzba.generate_random());
+            CHECK(d.type != zba::InstrType::ILLEGAL);
+            zba_types[(int)d.type]++;
+        }
+        CHECK_EQ((int)zba_types.size(), 3);
+
+        zbb::opgen::OpcodeGenerator gzbb(111);
+        zbb::Decoder dzbb;
+        std::map<int,int> zbb_types;
+        uint32_t rori_lo = 32, rori_hi = 0;
+        for (int k = 0; k < N; k++) {
+            auto d = dzbb.decode(gzbb.generate_random());
+            CHECK(d.type != zbb::InstrType::ILLEGAL);
+            zbb_types[(int)d.type]++;
+            if (d.type == zbb::InstrType::RORI) {
+                rori_lo = std::min(rori_lo, (uint32_t)d.shamt);
+                rori_hi = std::max(rori_hi, (uint32_t)d.shamt);
+            }
+        }
+        CHECK_EQ((int)zbb_types.size(), 18);
+        CHECK_EQ(rori_lo, 0u); CHECK_EQ(rori_hi, 31u);
+
+        zbs::opgen::OpcodeGenerator gzbs(112);
+        zbs::Decoder dzbs;
+        std::map<int,int> zbs_types;
+        for (int k = 0; k < N; k++) {
+            auto d = dzbs.decode(gzbs.generate_random());
+            CHECK(d.type != zbs::InstrType::ILLEGAL);
+            zbs_types[(int)d.type]++;
+        }
+        CHECK_EQ((int)zbs_types.size(), 8);
+
+        zicond::opgen::OpcodeGenerator gzc(113);
+        zicond::Decoder dzc;
+        std::map<int,int> zc_types;
+        for (int k = 0; k < N; k++) {
+            auto d = dzc.decode(gzc.generate_random());
+            CHECK(d.type != zicond::InstrType::ILLEGAL);
+            zc_types[(int)d.type]++;
+        }
+        CHECK_EQ((int)zc_types.size(), 2);
+        PASS();
+    }
+    {
+        TEST("Zicsr opgen (M-only config) covers every always-implemented CSR");
+        zicsr::opgen::OpcodeGenerator g(114);
+        zicsr::Decoder dec;
+        std::map<int,int> types;
+        std::set<int> csrs;
+        for (int k = 0; k < N; k++) {
+            auto d = dec.decode(g.generate_random());
+            CHECK(d.type != zicsr::CSRInstrType::ILLEGAL);
+            types[(int)d.type]++;
+            csrs.insert(d.csr);
+        }
+        CHECK_EQ((int)types.size(), 6);
+        // 19 writable M-mode CSRs + 12 read-only ones always exist.
+        const uint16_t always[] = {
+            0x001, 0x002, 0x003, 0x300, 0x304, 0x305, 0x306, 0x310, 0x30A,
+            0x31A, 0x340, 0x341, 0x342, 0x343, 0x344,
+            0xB00, 0xB02, 0xB80, 0xB82,
+            0xC00, 0xC01, 0xC02, 0xC80, 0xC81, 0xC82,
+            0xF11, 0xF12, 0xF13, 0xF14, 0xF15, 0x301,
+        };
+        for (uint16_t a : always)
+            CHECK(csrs.count(a));
+        // Mode-dependent CSRs must NOT appear in the default config.
+        CHECK(!csrs.count(0x302));  // medeleg
+        CHECK(!csrs.count(0x303));  // mideleg
+        CHECK(!csrs.count(0x100));  // sstatus
+        CHECK(!csrs.count(0x180));  // satp
+        PASS();
+    }
+    {
+        TEST("Zicsr opgen (S/U config) covers delegation and supervisor CSRs");
+        zicsr::opgen::OpcodeGenerator g(115);
+        g.set_s_mode(true);
+        g.set_u_mode(true);
+        std::set<int> csrs;
+        for (int k = 0; k < N; k++) {
+            uint32_t w = g.generate_random();
+            csrs.insert((w >> 20) & 0xFFF);
+        }
+        const uint16_t su_csrs[] = {
+            0x302, 0x303,                          // medeleg, mideleg
+            0x100, 0x104, 0x105, 0x106,            // sstatus, sie, stvec, scounteren
+            0x140, 0x141, 0x142, 0x143, 0x144,     // sscratch..sip
+            0x180,                                 // satp
+        };
+        for (uint16_t a : su_csrs)
+            CHECK(csrs.count(a));
+        PASS();
+    }
+    {
+        TEST("Zicsr opgen (S/U config) is trap-free on an S/U-mode CPU");
+        CPUConfig cfg;
+        cfg.enable_s_mode = true;
+        cfg.enable_u_mode = true;
+        auto sys = make_sys(4096, cfg);
+        zicsr::opgen::OpcodeGenerator gen(116);
+        gen.set_s_mode(true);
+        gen.set_u_mode(true);
+        for (int i = 0; i < 3000; i++) {
+            uint32_t op = gen.generate_random();
+            sys.cpu.pc = 0;
+            sys.memory.write32(0, op);
+            auto r = sys.step();
+            if (r.trap) {
+                printf("FAIL\n        trap on generated %08X (%s)\n",
+                       op, r.mnemonic.c_str());
+                g_failures++;
+                return;
+            }
+        }
+        PASS();
+    }
+    {
+        TEST("Zifencei opgen: canonical by default, field-random mode decodes");
+        zifencei::opgen::OpcodeGenerator g(117);
+        zifencei::Decoder dec;
+        for (int k = 0; k < 1000; k++)
+            CHECK_EQ(g.generate_random(), 0x0000100Fu);
+        g.set_standard_only(false);
+        std::set<uint32_t> distinct;
+        for (int k = 0; k < 1000; k++) {
+            uint32_t w = g.generate_random();
+            CHECK(dec.decode(w).type == zifencei::InstrType::FENCE_I);
+            distinct.insert(w);
+        }
+        CHECK(distinct.size() > 100u);   // ignored fields really randomized
+        PASS();
+    }
+}
+
 int main() {
     printf("RISC-V reference model test suite\n");
     printf("==================================\n");
@@ -2181,6 +2503,7 @@ int main() {
     test_supervisor_user_mode();
     test_integration();
     test_step_opcode_injection();
+    test_opgen_coverage();
 
     printf("==================================\n");
     printf("%d tests, %d failures\n", g_tests, g_failures);

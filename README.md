@@ -129,12 +129,17 @@ suite for randomized round-trip and execution stimulus:
 `riscv_rv32c_opgen.hpp`, `riscv_rv32f_opgen.hpp`, `riscv_rv32fc_opgen.hpp`,
 `riscv_zicsr_opgen.hpp`, `riscv_zifencei_opgen.hpp`, `riscv_zba_opgen.hpp`,
 `riscv_zbb_opgen.hpp`, `riscv_zbs_opgen.hpp`, `riscv_zicond_opgen.hpp`.
+Notes: the Zicsr generator targets only existing CSRs — its CSR pools
+grow when `set_s_mode()`/`set_u_mode()` are enabled to match the CPU
+configuration (keeping stimulus trap-free), and the Zifencei generator
+emits the canonical FENCE.I unless `set_standard_only(false)` is used to
+randomize the spec-ignored rd/rs1/imm fields.
 
 ### Tests and docs
 
 | File | Description |
 |---|---|
-| `test_riscv_model.cpp` | The test suite: regression tests for every fixed bug, full-CPU integration tests (dispatch, traps, interrupts, MRET/SRET, misalignment, access faults, interrupt prioritization/gating, `sstatus` subset, SATP/TVM, MRET legality), and opcode-generator round trips for all extensions. Minimal built-in harness (TEST/CHECK macros), no external framework. |
+| `test_riscv_model.cpp` | The test suite: regression tests for every fixed bug, full-CPU integration tests (dispatch, traps, interrupts, MRET/SRET, misalignment, access faults, interrupt prioritization/gating, `sstatus` subset, SATP/TVM, MRET legality), opcode-generator round trips for all extensions, and opgen coverage tests (every instruction type generated, operand fields spanning their full valid ranges, CSR address pools). Minimal built-in harness (TEST/CHECK macros), no external framework. |
 | `Makefile` | Builds the test suite into `build/` and runs it (`make test`). |
 | [AGENTS.md](AGENTS.md) | Project conventions for AI coding agents (layout, build/test rules). |
 | [notes.md](doc/notes.md) | Design Q&A notes on RISC-V hardware implementation: extension priorities for cache-less systems, dual-issue of compressed instructions, and serial execution in debug mode. |

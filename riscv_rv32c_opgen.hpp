@@ -196,11 +196,12 @@ inline uint16_t gen_c_li(RNG& rng) {
 
 // C.ADDI16SP: 011 | nzimm[9] | 00010 | nzimm[4|6|8:7|5] | 01
 inline uint16_t gen_c_addi16sp(RNG& rng) {
-    // nzimm is signed, scaled by 16, range -512 to 496 (non-zero)
+    // nzimm is signed, scaled by 16, full valid range -512 to 496
+    // (non-zero). Draw the multiplier uniformly from [-32, 31] so the
+    // -512 extreme is reachable, and reject the reserved 0 encoding.
     int32_t nzimm;
     do {
-        nzimm = rng.range(0, 31) * 16;
-        if (rng.chance(0.5)) nzimm = -nzimm;
+        nzimm = rng.srange(-32, 31) * 16;
     } while (nzimm == 0);
     
     uint16_t instr = 0b01;

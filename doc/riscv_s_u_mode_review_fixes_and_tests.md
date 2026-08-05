@@ -220,7 +220,7 @@ Result: **98 tests, 0 failures**, committed as `7dc9453` and pushed to `main`.
 
 ## Assistant
 
-Created the prompt template at `/home/maik/.pi/agent/prompts/gg.md` (global, so it's available in every project).
+Created the prompt template at `~/.pi/agent/prompts/gg.md` (global, so it's available in every project).
 
 Usage:
 - `/gg` — shows the last 25 entries of the git graph
@@ -347,9 +347,9 @@ Nothing noteworthy: `main` is fully in sync with origin; all 13 commits shown (t
 
 Done. The export-md skill is now a real slash command:
 
-1. **Moved the script** to `/home/maik/.pi/agent/scripts/export_md.py` (so it survives the skill removal).
-2. **Created the prompt template** `/home/maik/.pi/agent/prompts/export-md.md` with `argument-hint: "<filename.md>"`, containing the same instructions the skill had (derive title + intro, run the script with `--title`/`--intro`, show output path/size afterward, only commit if asked).
-3. **Removed the skill** — `/home/maik/.pi/agent/skills/` is now empty.
+1. **Moved the script** to `~/.pi/agent/scripts/export_md.py` (so it survives the skill removal).
+2. **Created the prompt template** `~/.pi/agent/prompts/export-md.md` with `argument-hint: "<filename.md>"`, containing the same instructions the skill had (derive title + intro, run the script with `--title`/`--intro`, show output path/size afterward, only commit if asked).
+3. **Removed the skill** — `~/.pi/agent/skills/` is now empty.
 
 Usage is unchanged: `/export-md notes.md`. The autocomplete dropdown will show the filename hint and description.
 
@@ -368,7 +368,7 @@ Usage is unchanged: `/export-md notes.md`. The autocomplete dropdown will show t
 > Then run from the current working directory:
 > 
 > ```bash
-> python3 /home/maik/.pi/agent/scripts/export_md.py  \
+> python3 ~/.pi/agent/scripts/export_md.py  \
 >     --title "<short session summary>" \
 >     --intro "<introduction paragraph>"
 > ```
@@ -403,7 +403,7 @@ It looks like `/export-md` was invoked without a filename argument. What should 
 
 ## Assistant
 
-Updated `/home/maik/.pi/agent/prompts/export-md.md`:
+Updated `~/.pi/agent/prompts/export-md.md`:
 
 - **Argument is now optional** — `argument-hint: "[filename.md]"`.
 - If no filename is given, the command **derives one from the session title**: lowercase, underscores, filesystem-safe, `.md` extension (e.g. `riscv_s_u_mode_review_and_testing.md`).
@@ -426,7 +426,7 @@ So `/export-md` now works standalone, and `/export-md my-notes.md` still honors 
 > Then run from the current working directory:
 > 
 > ```bash
-> python3 /home/maik/.pi/agent/scripts/export_md.py  \
+> python3 ~/.pi/agent/scripts/export_md.py  \
 >     --title "<short session summary>" \
 >     --intro "<introduction paragraph>"
 > ```

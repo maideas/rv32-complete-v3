@@ -1175,7 +1175,7 @@ The README now contains the three guides: the complete opcode-generator usage re
 > Then run from the current working directory:
 > 
 > ```bash
-> python3 /home/maik/.pi/agent/scripts/export_md.py <filename.md> \
+> python3 ~/.pi/agent/scripts/export_md.py <filename.md> \
 >     --title "<short session summary>" \
 >     --intro "<introduction paragraph>"
 > ```

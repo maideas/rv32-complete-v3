@@ -487,8 +487,8 @@ MMU (Sv32) and PMP are intentionally still stubbed out — `satp` values are sto
 
 ## User
 
-> <skill name="export-md" location="/home/maik/.pi/agent/skills/export-md/SKILL.md">
-> References are relative to /home/maik/.pi/agent/skills/export-md.
+> <skill name="export-md" location="~/.pi/agent/skills/export-md/SKILL.md">
+> References are relative to ~/.pi/agent/skills/export-md.
 > 
 > ### export-md
 > 

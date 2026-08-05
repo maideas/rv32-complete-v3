@@ -114,8 +114,9 @@ public:
     // Enable-mask configuration, uniform with the other generators
     // (only one instruction type exists here; an empty mask is legalized
     // back to enabled).
-    void set_enabled_mask(uint64_t mask) { type_enabled_ = (mask != 0); }
-    uint64_t get_enabled_mask() const { return type_enabled_ ? 1ull : 0ull; }
+    void enable_group(uint64_t group_mask, bool on = true) {
+        if (group_mask != 0) type_enabled_ = on;
+    }
     void enable(InstrType, bool on = true) { type_enabled_ = on; }
 
     uint32_t generate(InstrType type) {

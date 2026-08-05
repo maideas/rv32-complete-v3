@@ -125,7 +125,7 @@ the directory to your include path and `#include "riscv_cpu.hpp"`.
 Each `riscv_<ext>_opgen.hpp` generates random *valid* opcodes for its
 extension (all fields randomized within legal bounds), used by the test
 suite for randomized round-trip and execution stimulus. Every generator
-supports a **per-instruction-type enable mask** (`set_enabled_mask()`,
+supports a **per-instruction-type enable mask** (`enable_group()`,
 `enable()`, with named `groups::` constants like `groups::LOADS` or
 `groups::FMA`) so stimulus can be restricted during bring-up (generate
 only what the implementation already supports) or debugging (focus on a
@@ -368,10 +368,15 @@ groups):
 ```cpp
 rv32i::opgen::OpcodeGenerator gen(42);
 
-gen.set_enabled_mask(rv32i::opgen::groups::LOADS |
-                     rv32i::opgen::groups::STORES);   // LSU bring-up
+gen.enable_group(rv32i::opgen::groups::ALL, false);  // start empty ...
+gen.enable_group(rv32i::opgen::groups::LOADS |
+                 rv32i::opgen::groups::STORES);       // ... LSU bring-up
 gen.enable(rv32i::opgen::InstrType::JAL, true);       // plus one type
 gen.enable(rv32i::opgen::InstrType::LB, false);       // minus one type
+
+// Disabling works the same way, per group or several at once:
+gen.enable_group(rv32i::opgen::groups::SYSTEM |
+                 rv32i::opgen::groups::FENCE_OP, false);
 
 gen.generate_random();        // only enabled types, uniformly
 gen.generate(rv32i::opgen::InstrType::SUB);  // explicit: ignores the mask
@@ -386,7 +391,8 @@ Semantics:
   list is fully masked out.
 - An **empty mask is legalized to all-enabled** — no empty streams.
 - Mask constants compose with `|`; `type_bit(type)` builds single-type
-  masks; `get_enabled_mask()` reads the current mask back.
+  masks; `enable_group(mask, on)` sets or clears the given group bits
+  on top of the current state (like `enable()` for single types).
 
 Named group constants per generator:
 
@@ -418,7 +424,8 @@ generated (they are valid NOPs).
 illegal_opgen::ClassGenerator gen(42);
 const illegal_opgen::ClassInfo* info = nullptr;
 
-gen.set_enabled_mask(illegal_opgen::groups::COMPRESSED);
+gen.enable_group(illegal_opgen::groups::ALL, false);
+gen.enable_group(illegal_opgen::groups::COMPRESSED);
 uint32_t op = gen.generate_random(info);
 // info->name (e.g. "C.LWSP rd=x0"), info->compressed (mtval = parcel)
 
@@ -472,9 +479,10 @@ maturity.
 
    ```cpp
    rv32i::opgen::OpcodeGenerator stim(seed);
-   stim.set_enabled_mask(rv32i::opgen::groups::ALU_IMM |
-                         rv32i::opgen::groups::ALU_REG |
-                         rv32i::opgen::groups::SHIFTS);
+   stim.enable_group(rv32i::opgen::groups::ALL, false);
+   stim.enable_group(rv32i::opgen::groups::ALU_IMM |
+                     rv32i::opgen::groups::ALU_REG |
+                     rv32i::opgen::groups::SHIFTS);
 
    CPU model(cfg);
    for (;;) {

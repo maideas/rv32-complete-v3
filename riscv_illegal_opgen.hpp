@@ -551,8 +551,9 @@ public:
 
     void seed(uint32_t s) { rng_.seed(s); }
 
-    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
-    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable_group(uint64_t group_mask, bool on = true) {
+        if (on) enabled_ |= group_mask; else enabled_ &= ~group_mask;
+    }
     void enable(size_t class_index, bool on = true) {
         if (on) enabled_ |= groups::bit(class_index);
         else    enabled_ &= ~groups::bit(class_index);

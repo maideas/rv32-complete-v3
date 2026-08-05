@@ -2721,14 +2721,16 @@ static void test_opgen_masks() {
         TEST("RV32I mask: group-only and single-type generation");
         rv32i::opgen::OpcodeGenerator g(501);
         rv32i::Decoder dec;
-        g.set_enabled_mask(rv32i::opgen::groups::LOADS);
+        g.enable_group(rv32i::opgen::groups::ALL, false);
+        g.enable_group(rv32i::opgen::groups::LOADS);
         for (int k = 0; k < 2000; k++) {
             auto t = dec.decode(g.generate_random()).type;
             CHECK(t == rv32i::InstrType::LB || t == rv32i::InstrType::LH ||
                   t == rv32i::InstrType::LW || t == rv32i::InstrType::LBU ||
                   t == rv32i::InstrType::LHU);
         }
-        g.set_enabled_mask(rv32i::opgen::type_bit(rv32i::opgen::InstrType::SLTIU));
+        g.enable_group(rv32i::opgen::groups::ALL, false);
+        g.enable_group(rv32i::opgen::type_bit(rv32i::opgen::InstrType::SLTIU));
         for (int k = 0; k < 200; k++)
             CHECK(dec.decode(g.generate_random()).type == rv32i::InstrType::SLTIU);
         PASS();
@@ -2738,7 +2740,8 @@ static void test_opgen_masks() {
         {
             rv32m::opgen::OpcodeGenerator g(502);
             rv32m::Decoder dec;
-            g.set_enabled_mask(rv32m::opgen::groups::DIVIDE);
+            g.enable_group(rv32m::opgen::groups::ALL, false);
+            g.enable_group(rv32m::opgen::groups::DIVIDE);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == rv32m::InstrType::DIV || t == rv32m::InstrType::DIVU ||
@@ -2748,7 +2751,8 @@ static void test_opgen_masks() {
         {
             rv32f::opgen::OpcodeGenerator g(503);
             rv32f::Decoder dec;
-            g.set_enabled_mask(rv32f::opgen::groups::FMA);
+            g.enable_group(rv32f::opgen::groups::ALL, false);
+            g.enable_group(rv32f::opgen::groups::FMA);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == rv32f::InstrType::FMADD_S || t == rv32f::InstrType::FMSUB_S ||
@@ -2758,7 +2762,8 @@ static void test_opgen_masks() {
         {
             rv32c::opgen::OpcodeGenerator g(504);
             rv32c::Decoder dec;
-            g.set_enabled_mask(rv32c::opgen::groups::C_FLOW);
+            g.enable_group(rv32c::opgen::groups::ALL, false);
+            g.enable_group(rv32c::opgen::groups::C_FLOW);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == rv32c::InstrType::C_JAL || t == rv32c::InstrType::C_J ||
@@ -2769,7 +2774,8 @@ static void test_opgen_masks() {
         {
             rv32a::opgen::OpcodeGenerator g(505);
             rv32a::Decoder dec;
-            g.set_enabled_mask(rv32a::opgen::groups::LR_SC);
+            g.enable_group(rv32a::opgen::groups::ALL, false);
+            g.enable_group(rv32a::opgen::groups::LR_SC);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == rv32a::InstrType::LR_W || t == rv32a::InstrType::SC_W);
@@ -2778,7 +2784,8 @@ static void test_opgen_masks() {
         {
             zicsr::opgen::OpcodeGenerator g(506);
             zicsr::Decoder dec;
-            g.set_enabled_mask(zicsr::opgen::groups::IMM_FORMS);
+            g.enable_group(zicsr::opgen::groups::ALL, false);
+            g.enable_group(zicsr::opgen::groups::IMM_FORMS);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == zicsr::CSRInstrType::CSRRWI ||
@@ -2789,7 +2796,8 @@ static void test_opgen_masks() {
         {
             zbb::opgen::OpcodeGenerator g(507);
             zbb::Decoder dec;
-            g.set_enabled_mask(zbb::opgen::groups::ROTATE);
+            g.enable_group(zbb::opgen::groups::ALL, false);
+            g.enable_group(zbb::opgen::groups::ROTATE);
             for (int k = 0; k < 1000; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == zbb::InstrType::ROL || t == zbb::InstrType::ROR ||
@@ -2799,7 +2807,8 @@ static void test_opgen_masks() {
         {
             zbs::opgen::OpcodeGenerator g(508);
             zbs::Decoder dec;
-            g.set_enabled_mask(zbs::opgen::groups::SET);
+            g.enable_group(zbs::opgen::groups::ALL, false);
+            g.enable_group(zbs::opgen::groups::SET);
             for (int k = 0; k < 500; k++) {
                 auto t = dec.decode(g.generate_random()).type;
                 CHECK(t == zbs::InstrType::BSET || t == zbs::InstrType::BSETI);
@@ -2808,14 +2817,16 @@ static void test_opgen_masks() {
         {
             zicond::opgen::OpcodeGenerator g(509);
             zicond::Decoder dec;
-            g.set_enabled_mask(zicond::opgen::type_bit(zicond::opgen::InstrType::CZERO_EQZ));
+            g.enable_group(zicond::opgen::groups::ALL, false);
+            g.enable_group(zicond::opgen::type_bit(zicond::opgen::InstrType::CZERO_EQZ));
             for (int k = 0; k < 200; k++)
                 CHECK(dec.decode(g.generate_random()).type == zicond::InstrType::CZERO_EQZ);
         }
         {
             zba::opgen::OpcodeGenerator g(510);
             zba::Decoder dec;
-            g.set_enabled_mask(zba::opgen::type_bit(zba::opgen::InstrType::SH2ADD));
+            g.enable_group(zba::opgen::groups::ALL, false);
+            g.enable_group(zba::opgen::type_bit(zba::opgen::InstrType::SH2ADD));
             for (int k = 0; k < 200; k++)
                 CHECK(dec.decode(g.generate_random()).type == zba::InstrType::SH2ADD);
         }
@@ -2825,8 +2836,8 @@ static void test_opgen_masks() {
         TEST("RV32C hint mask: restricted hints; mixed falls back to canonical");
         rv32c::opgen::OpcodeGenerator g(511);
         rv32c::Decoder dec;
-        g.set_enabled_mask(
-            rv32c::opgen::hint_bit(rv32c::opgen::HintType::C_LUI_X0) |
+        g.enable_group(rv32c::opgen::groups::ALL, false);
+        g.enable_group(rv32c::opgen::hint_bit(rv32c::opgen::HintType::C_LUI_X0) |
             rv32c::opgen::hint_bit(rv32c::opgen::HintType::C_ADDI_X0));
         for (int k = 0; k < 2000; k++) {
             auto d = dec.decode(g.generate_hint());
@@ -2835,7 +2846,8 @@ static void test_opgen_masks() {
         }
         // Canonical-only mask: generate_mixed's hint path must fall back
         // to canonical types (never emits a HINT).
-        g.set_enabled_mask(rv32c::opgen::groups::C_FLOW);
+        g.enable_group(rv32c::opgen::groups::ALL, false);
+        g.enable_group(rv32c::opgen::groups::C_FLOW);
         for (int k = 0; k < 2000; k++) {
             uint16_t w = g.generate_mixed(0.9);
             CHECK(!is_c_hint(w));
@@ -2850,13 +2862,13 @@ static void test_opgen_masks() {
         TEST("Default and explicit ALL masks produce identical streams");
         {
             rv32i::opgen::OpcodeGenerator a(512), b(512);
-            b.set_enabled_mask(rv32i::opgen::groups::ALL);
+            b.enable_group(rv32i::opgen::groups::ALL);
             for (int k = 0; k < 1000; k++)
                 CHECK_EQ(a.generate_random(), b.generate_random());
         }
         {
             rv32c::opgen::OpcodeGenerator a(513), b(513);
-            b.set_enabled_mask(rv32c::opgen::groups::ALL);
+            b.enable_group(rv32c::opgen::groups::ALL);
             for (int k = 0; k < 500; k++) {
                 CHECK_EQ(a.generate_random(), b.generate_random());
                 CHECK_EQ(a.generate_hint(), b.generate_hint());
@@ -2864,13 +2876,13 @@ static void test_opgen_masks() {
         }
         {
             rv32f::opgen::OpcodeGenerator a(514), b(514);
-            b.set_enabled_mask(rv32f::opgen::groups::ALL);
+            b.enable_group(rv32f::opgen::groups::ALL);
             for (int k = 0; k < 500; k++)
                 CHECK_EQ(a.generate_random(), b.generate_random());
         }
         {
             rv32m::opgen::OpcodeGenerator a(515), b(515);
-            b.set_enabled_mask(rv32m::opgen::groups::ALL);
+            b.enable_group(rv32m::opgen::groups::ALL);
             for (int k = 0; k < 200; k++)
                 CHECK_EQ(a.generate_random(), b.generate_random());
         }
@@ -2880,7 +2892,7 @@ static void test_opgen_masks() {
         TEST("Empty enable mask is legalized back to ALL");
         rv32i::opgen::OpcodeGenerator g(516);
         rv32i::Decoder dec;
-        g.set_enabled_mask(0);
+        g.enable_group(rv32i::opgen::groups::ALL, false);
         std::set<int> types;
         for (int k = 0; k < 2000; k++)
             types.insert((int)dec.decode(g.generate_random()).type);
@@ -2891,7 +2903,8 @@ static void test_opgen_masks() {
         TEST("Auxiliary selectors honor the mask and fall back gracefully");
         rv32i::opgen::OpcodeGenerator g(517);
         rv32i::Decoder dec;
-        g.set_enabled_mask(rv32i::opgen::groups::LOADS |
+        g.enable_group(rv32i::opgen::groups::ALL, false);
+        g.enable_group(rv32i::opgen::groups::LOADS |
                            rv32i::opgen::groups::STORES);
         // generate_alu()/generate_branch() have no enabled type in their
         // lists: they must fall back to generate_random() (loads/stores).
@@ -2938,14 +2951,16 @@ static void test_opgen_masks() {
         illegal_opgen::ClassGenerator g(518);
         const illegal_opgen::ClassInfo* info = nullptr;
         rv32c::Decoder cdec;
-        g.set_enabled_mask(illegal_opgen::groups::COMPRESSED);
+        g.enable_group(illegal_opgen::groups::ALL, false);
+        g.enable_group(illegal_opgen::groups::COMPRESSED);
         for (int k = 0; k < 2000; k++) {
             uint32_t op = g.generate_random(info);
             CHECK(info->compressed);
             CHECK(cdec.decode((uint16_t)(op & 0xFFFF)).type ==
                   rv32c::InstrType::ILLEGAL);
         }
-        g.set_enabled_mask(illegal_opgen::groups::CANONICAL);
+        g.enable_group(illegal_opgen::groups::ALL, false);
+        g.enable_group(illegal_opgen::groups::CANONICAL);
         std::set<std::string> names;
         for (int k = 0; k < 200; k++) {
             g.generate_random(info);

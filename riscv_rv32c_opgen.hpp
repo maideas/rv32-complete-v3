@@ -656,8 +656,9 @@ public:
     // Enable-mask configuration (see rv32i opgen); bits 0-26 select the
     // canonical types, bits 27-35 the HINT families (hint_bit()). The
     // default (ALL) is seed-stable; an empty mask is legalized to ALL.
-    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
-    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable_group(uint64_t group_mask, bool on = true) {
+        if (on) enabled_ |= group_mask; else enabled_ &= ~group_mask;
+    }
     void enable(InstrType t, bool on = true) {
         if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
     }

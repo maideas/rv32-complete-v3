@@ -5,7 +5,7 @@
  * within legal bounds for each instruction type.
  *
  * Enable-mask configuration (same pattern in all opgen modules):
- * set_enabled_mask()/enable() restrict generate_random() and the
+ * enable_group()/enable() restrict generate_random() and the
  * auxiliary selectors to a subset of instruction types — useful during
  * bring-up (generate only what is already implemented) and debugging
  * (focus on a few groups). Named group masks live in opgen::groups.
@@ -493,8 +493,9 @@ public:
     // auxiliary selectors) to a subset of instruction types/groups, e.g.
     // during bring-up or debugging. The default (ALL) is seed-stable.
     // An empty mask is legalized back to ALL.
-    void set_enabled_mask(uint64_t mask) { enabled_ = mask; }
-    uint64_t get_enabled_mask() const { return enabled_; }
+    void enable_group(uint64_t group_mask, bool on = true) {
+        if (on) enabled_ |= group_mask; else enabled_ &= ~group_mask;
+    }
     void enable(InstrType t, bool on = true) {
         if (on) enabled_ |= type_bit(t); else enabled_ &= ~type_bit(t);
     }

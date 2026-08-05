@@ -251,11 +251,17 @@ public:
 
 constexpr OpcodeGenerator::GeneratorFunc OpcodeGenerator::generators[];
 
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+// Generate a single random compressed RV32FC opcode
 inline uint16_t generate_random_opcode(uint32_t seed = std::random_device{}()) {
     OpcodeGenerator gen(seed);
     return gen.generate_random();
 }
 
+// Generate N random compressed RV32FC opcodes
 inline std::vector<uint16_t> generate_random_opcodes(size_t n, uint32_t seed = std::random_device{}()) {
     OpcodeGenerator gen(seed);
     return gen.generate_sequence(n);
